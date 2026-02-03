@@ -1,0 +1,21 @@
+Email,Full Name,First Name,Last Name,Phone,Employee ID,Access Level,Location,Department,Role,Manager
+test-user-1@test.example.com,John Doe,John,Doe,+65-1234-5678,EMP-001,User,Headquarters,Engineering,Software Engineer,Test Admin
+test-user-2@test.example.com,Jane Smith,Jane,Smith,+65-2345-6789,EMP-002,User,Headquarters,Engineering,Software Engineer,Test Admin
+test-user-3@test.example.com,Bob Johnson,Bob,Johnson,+65-3456-7890,EMP-003,Manager,Headquarters,Sales,Account Executive,Test Admin
+test-user-4@test.example.com,Alice Williams,Alice,Williams,+65-4567-8901,EMP-004,User,Remote Office,HR,HR Manager,
+test-user-5@test.example.com,Charlie Brown,Charlie,Brown,+65-5678-9012,EMP-005,User,Data Center,Engineering,Senior Engineer,Test Admin
+test-user-6@test.example.com,David Lee,David,Lee,+65-6789-0123,EMP-006,User,Headquarters,Engineering,Software Engineer,NonExistent Manager
+test-user-7@test.example.com,Emma Wilson,Emma,Wilson,+65-7890-1234,EMP-007,User,Headquarters,NonExistent Department,Software Engineer,Test Admin
+test-user-8@test.example.com,Frank Miller,Frank,Miller,+65-8901-2345,EMP-008,User,Headquarters,Engineering,NonExistent Role,Test Admin
+test-user-9@test.example.com,Grace Taylor,Grace,Taylor,+65-9012-3456,EMP-009,User,NonExistent Location,Engineering,Software Engineer,Test Admin
+test-user-10@test.example.com,Henry Davis,Henry,Davis,+65-0123-4567,EMP-010,User,Headquarters,NonExistent Department,NonExistent Role,Test Admin
+test-user-11@test.example.com,Iris Martinez,Iris,Martinez,+65-1234-5679,EMP-011,User,NonExistent Location,Engineering,Software Engineer,NonExistent Manager
+test-user-12@test.example.com,Jack Anderson,Jack,Anderson,+65-2345-6780,EMP-012,User,NonExistent Location,NonExistent Department,Software Engineer,Test Admin
+test-user-13@test.example.com,Karen Thomas,Karen,Thomas,+65-3456-7891,EMP-013,User,NonExistent Location,Engineering,NonExistent Role,Test Admin
+test-user-14@test.example.com,Liam Jackson,Liam,Jackson,+65-4567-8902,EMP-014,User,Headquarters,NonExistent Department,Software Engineer,NonExistent Manager
+test-user-15@test.example.com,Maya White,Maya,White,+65-5678-9013,EMP-015,User,Headquarters,Engineering,NonExistent Role,NonExistent Manager
+test-user-16@test.example.com,Noah Harris,Noah,Harris,+65-6789-0124,EMP-016,User,NonExistent Location,NonExistent Department,NonExistent Role,Test Admin
+test-user-17@test.example.com,Olivia Clark,Olivia,Clark,+65-7890-1235,EMP-017,User,Headquarters,NonExistent Department,NonExistent Role,NonExistent Manager
+test-user-18@test.example.com,Paul Lewis,Paul,Lewis,+65-8901-2346,EMP-018,User,NonExistent Location,Engineering,NonExistent Role,NonExistent Manager
+test-user-19@test.example.com,Quinn Walker,Quinn,Walker,+65-9012-3457,EMP-019,User,NonExistent Location,NonExistent Department,Software Engineer,NonExistent Manager
+test-user-20@test.example.com,Ruby Hall,Ruby,Hall,+65-0123-4568,EMP-020,User,NonExistent Location,NonExistent Department,NonExistent Role,NonExistent Manager

@@ -1,0 +1,70 @@
+# Environment Variables Template for Client Onboarding
+# 
+# IMPORTANT: This is a TEMPLATE file - it contains NO actual secrets
+# 
+# Setup Instructions:
+# 1. Copy this file to .env.local (or .env) in the deploy/ directory:
+#    cp env-template.sh.example .env.local
+# 
+# 2. Replace all placeholder values with your actual secrets
+# 
+# 3. Source the file before running onboard-client.sh:
+#    source .env.local
+#    ./scripts/onboard-client.sh prod client-name
+#
+# The onboard-client.sh script will automatically load .env.local or .env if present
+# Both .env.local and .env are in .gitignore and will NOT be committed
+
+# Database Configuration
+# Database password set during Supabase project creation
+# Can be reset: Supabase Dashboard → Settings → Database → Database Password
+export PGPASSWORD="<your-database-password>"
+
+# Supabase Organization ID
+# Get from: Supabase Dashboard → Organization Settings
+export SUPABASE_ORG_ID="<your-supabase-org-id>"
+
+# AWS Region for Supabase projects
+export REGION="ap-southeast-1"  # or your preferred region (us-east-1, eu-west-1, etc.)
+
+# Supabase Service Role Key
+# Get from: Supabase Dashboard → Settings → API → service_role key
+# WARNING: This is a sensitive key - keep it secure!
+export SUPABASE_SERVICE_ROLE_KEY="<your-service-role-key>"
+
+# Supabase Database URL (direct connection, not pooler)
+# Format: postgresql://postgres:<password>@db.<project-ref>.supabase.co:6543/postgres
+# Get from: Supabase Dashboard → Settings → Database → Connection string (direct connection)
+export SUPABASE_DB_URL="postgresql://postgres:<password>@db.<project-ref>.supabase.co:6543/postgres"
+
+# Translation Services
+# Google Translate API Key
+# Get from: Google Cloud Console → APIs & Services → Credentials
+export GOOGLE_TRANSLATE_API_KEY="<your-google-translate-api-key>"
+
+# DeepL API Key
+# Get from: DeepL API Dashboard
+export DEEPL_API_KEY="<your-deepl-api-key>"
+
+# Lambda Configuration (used by Supabase Edge Functions to send emails)
+# Note: AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, SES_FROM_EMAIL) 
+# are configured in AWS Lambda, NOT in Supabase Edge Function secrets
+# Get from: AWS Lambda → Function URL
+export AUTH_LAMBDA_URL="<your-lambda-function-url>"
+
+# Master Database Configuration (for sync-lesson-content Edge Function)
+# This is the project reference for the master database where sync-lesson-content Edge Function runs
+# Set this to enable automatic client service key storage during onboarding
+# 
+# How to find your master project ref:
+# - Production master: Check your production master Supabase Dashboard URL
+#   Format: https://app.supabase.com/project/{project_ref}
+# - Dev master: Check your dev master Supabase Dashboard URL
+# 
+# Or from Supabase API URL: https://{project_ref}.supabase.co
+# 
+# Examples (replace with your actual values):
+# - Production: oownotmpcqcgojhrzqaj
+# - Dev: cleqfnrbiqpxpzxkatda
+export MASTER_PROJECT_REF="<master-project-ref>"
+

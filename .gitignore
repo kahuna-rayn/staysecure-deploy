@@ -1,0 +1,32 @@
+# Environment files (contain secrets - never commit!)
+# Note: env-template.sh.example is the template and CAN be committed
+.env
+.env.local
+*.env
+*.env.local
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+.temp/
+*.tmp
+*.log
+
+# Environment and secrets
+*.env
+*.env.local
+secrets/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
