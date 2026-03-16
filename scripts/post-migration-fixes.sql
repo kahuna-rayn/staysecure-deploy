@@ -94,3 +94,34 @@ WITH CHECK (
   (public.has_role(auth.uid(), 'super_admin'::public.app_role) OR public.has_role(auth.uid(), 'author'::public.app_role))
 );
 
+-- ========================================
+-- REQUIRED: Knowledge Documents Bucket
+-- ========================================
+-- The 'documents' bucket must be created via the Management API (not SQL INSERT)
+-- because Supabase internal storage metadata is not initialised by direct inserts.
+-- onboard-client.sh creates the bucket via the API before running this file.
+-- The policy below is safe to run even if the bucket doesn't exist yet — it will
+-- apply once the bucket is created.
+
+DROP POLICY IF EXISTS "Admins can manage document files" ON storage.objects;
+CREATE POLICY "Admins can manage document files"
+ON storage.objects
+FOR ALL
+TO authenticated
+USING (
+  bucket_id = 'documents'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+)
+WITH CHECK (
+  bucket_id = 'documents'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+);
+
