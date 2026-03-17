@@ -125,3 +125,105 @@ WITH CHECK (
   )
 );
 
+-- ============================================================
+-- Certificate PDF storage bucket RLS
+-- Run AFTER creating the 'certificates' bucket in the Dashboard
+-- ============================================================
+
+-- Admins can upload/manage certificate PDFs
+CREATE POLICY "Admins can manage certificate files"
+ON storage.objects
+FOR ALL
+TO authenticated
+USING (
+  bucket_id = 'certificates'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+)
+WITH CHECK (
+  bucket_id = 'certificates'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+);
+
+-- ============================================================
+-- DB column migrations for certificate generation
+-- ============================================================
+
+-- Storage path for the generated PDF (not a signed URL — signed URLs are on-demand via get-certificate-url)
+ALTER TABLE certificates ADD COLUMN IF NOT EXISTS certificate_url text;
+
+-- Org logo URL used on certificates (column renamed from logo_url to org_logo_url for clarity)
+ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS org_logo_url text;
+
+-- ============================================================
+-- Storage RLS policies: certificates bucket (private)
+-- ============================================================
+
+-- Edge function (service role) uploads PDFs — no RLS policy needed for service role
+-- Users can read their own certificate files via signed URLs (get-certificate-url function)
+-- Admins can manage all certificate files directly
+
+DROP POLICY IF EXISTS "Users can read own certificate files" ON storage.objects;
+CREATE POLICY "Users can read own certificate files"
+ON storage.objects FOR SELECT TO authenticated
+USING (
+  bucket_id = 'certificates'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
+
+DROP POLICY IF EXISTS "Admins can manage certificate files" ON storage.objects;
+CREATE POLICY "Admins can manage certificate files"
+ON storage.objects FOR ALL TO authenticated
+USING (
+  bucket_id = 'certificates'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+)
+WITH CHECK (
+  bucket_id = 'certificates'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+);
+
+-- ============================================================
+-- Storage RLS policies: logos bucket (public read)
+-- ============================================================
+
+DROP POLICY IF EXISTS "Public read for org logos" ON storage.objects;
+CREATE POLICY "Public read for org logos"
+ON storage.objects FOR SELECT TO public
+USING (bucket_id = 'logos');
+
+DROP POLICY IF EXISTS "Admins can manage org logos" ON storage.objects;
+CREATE POLICY "Admins can manage org logos"
+ON storage.objects FOR ALL TO authenticated
+USING (
+  bucket_id = 'logos'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+)
+WITH CHECK (
+  bucket_id = 'logos'
+  AND EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+      AND role IN ('super_admin', 'client_admin')
+  )
+);
+
