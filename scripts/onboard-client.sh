@@ -201,11 +201,18 @@ if [ -f "backups/schema.dump" ]; then
             }
     fi
     
-    # Create avatars bucket if it doesn't exist (buckets are not always included in storage.dump)
-    echo -e "${GREEN}Ensuring avatars bucket exists...${NC}"
-    psql "${CONNECTION_STRING}" \
-        --command "INSERT INTO storage.buckets (id, name, public) VALUES ('avatars', 'avatars', true) ON CONFLICT (id) DO NOTHING;" || {
-        echo -e "${YELLOW}Warning: Failed to create avatars bucket (may already exist)${NC}"
+    # Create required storage buckets (idempotent — safe to re-run)
+    echo -e "${GREEN}Ensuring storage buckets exist...${NC}"
+    psql "${CONNECTION_STRING}" --command "
+        INSERT INTO storage.buckets (id, name, public, file_size_limit)
+        VALUES
+            ('avatars',      'avatars',      true,  2097152),
+            ('documents',    'documents',    false, 10485760),
+            ('certificates', 'certificates', false, 10485760),
+            ('logos',        'logos',        true,  2097152)
+        ON CONFLICT (id) DO NOTHING;
+    " || {
+        echo -e "${YELLOW}Warning: Failed to create storage buckets (may already exist)${NC}"
     }
 
     # Restore data based on type (using custom format if available, otherwise SQL)
@@ -429,31 +436,6 @@ else
     fi
 fi
 
-# -----------------------------------------------------------------------
-# Create required storage buckets (idempotent — safe to run on re-runs)
-# Must be done via Management API; direct SQL inserts don't initialise
-# Supabase internal storage metadata and cause 400 errors on upload.
-# -----------------------------------------------------------------------
-if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
-    for BUCKET_NAME in "documents"; do
-        echo -e "${GREEN}Ensuring '${BUCKET_NAME}' bucket exists...${NC}"
-        BUCKET_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            "https://api.supabase.com/v1/projects/${PROJECT_REF}/storage/buckets" \
-            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\":\"${BUCKET_NAME}\",\"public\":false}")
-        BUCKET_HTTP_CODE=$(echo "$BUCKET_RESPONSE" | tail -n1)
-        if [ "$BUCKET_HTTP_CODE" = "200" ] || [ "$BUCKET_HTTP_CODE" = "201" ] || [ "$BUCKET_HTTP_CODE" = "409" ]; then
-            echo -e "${GREEN}✓ '${BUCKET_NAME}' bucket ready${NC}"
-        else
-            echo -e "${YELLOW}Warning: Could not create '${BUCKET_NAME}' bucket via API (HTTP ${BUCKET_HTTP_CODE})${NC}"
-            echo -e "${YELLOW}  Create it manually: Supabase Dashboard → Storage → New Bucket → Name: ${BUCKET_NAME}, Public: false${NC}"
-        fi
-    done
-else
-    echo -e "${YELLOW}Warning: SUPABASE_ACCESS_TOKEN not set — cannot create storage buckets automatically${NC}"
-    echo -e "${YELLOW}  Create manually: Supabase Dashboard → Storage → New Bucket → Name: documents, Public: false${NC}"
-fi
 
 # Set Edge Function secrets
 echo -e "${GREEN}Setting Edge Function secrets...${NC}"
@@ -484,6 +466,15 @@ REQUIRED_VARS=(
     "MANAGER_NOTIFICATION_COOLDOWN_HOURS"
 )
 
+# Certificate renderer secrets (optional — warn if not set)
+if [ -z "$CERT_RENDERER_URL" ]; then
+    echo -e "${YELLOW}Warning: CERT_RENDERER_URL not set — certificate PDF generation will not work${NC}"
+    echo -e "${YELLOW}  Set to the Vercel deployment URL of the certificate-renderer project${NC}"
+fi
+if [ -z "$CERT_RENDER_SECRET" ]; then
+    echo -e "${YELLOW}Warning: CERT_RENDER_SECRET not set — certificate PDF generation will not work${NC}"
+fi
+
 MISSING_VARS=()
 for var in "${REQUIRED_VARS[@]}"; do
     if [ -z "${!var}" ]; then
@@ -511,6 +502,15 @@ supabase secrets set \
     MANAGER_NOTIFICATION_COOLDOWN_HOURS=${MANAGER_NOTIFICATION_COOLDOWN_HOURS} \
     --project-ref ${PROJECT_REF}
 
+# Set certificate renderer secrets (if provided)
+if [ -n "$CERT_RENDERER_URL" ] && [ -n "$CERT_RENDER_SECRET" ]; then
+    supabase secrets set \
+        CERT_RENDERER_URL=${CERT_RENDERER_URL} \
+        CERT_RENDER_SECRET=${CERT_RENDER_SECRET} \
+        --project-ref ${PROJECT_REF}
+    echo -e "${GREEN}✓ Certificate renderer secrets set${NC}"
+fi
+
 # Deploy Edge Functions (not included in database dumps)
 echo -e "${GREEN}Deploying Edge Functions...${NC}"
 supabase functions deploy create-user --no-verify-jwt --project-ref ${PROJECT_REF}
@@ -523,6 +523,8 @@ supabase functions deploy translate-lesson --no-verify-jwt --project-ref ${PROJE
 supabase functions deploy translation-status --no-verify-jwt --project-ref ${PROJECT_REF}
 supabase functions deploy get-document-url --no-verify-jwt --project-ref ${PROJECT_REF}
 supabase functions deploy process-scheduled-notifications --no-verify-jwt --project-ref ${PROJECT_REF}
+supabase functions deploy generate-certificate --no-verify-jwt --project-ref ${PROJECT_REF}
+supabase functions deploy get-certificate-url --no-verify-jwt --project-ref ${PROJECT_REF}
 
 # Ensure pg_cron is enabled and schedule manager notification job
 echo -e "${GREEN}Configuring manager notification cron job...${NC}"
@@ -701,7 +703,7 @@ TARGET_AUTH_USER_TRIGGER=$(psql "${CONNECTION_STRING}" -t -c "SELECT EXISTS(SELE
 [ "$TARGET_AUTH_USER_TRIGGER" = "t" ] && TARGET_AUTH_USER_TRIGGER="Yes" || TARGET_AUTH_USER_TRIGGER="No"
 
 # Check edge functions
-EXPECTED_FUNCTIONS=("create-user" "delete-user" "send-email" "send-password-reset" "update-password" "update-user-password" "translate-lesson" "translation-status" "get-document-url" "process-scheduled-notifications")
+EXPECTED_FUNCTIONS=("create-user" "delete-user" "send-email" "send-password-reset" "update-password" "update-user-password" "translate-lesson" "translation-status" "get-document-url" "process-scheduled-notifications" "generate-certificate" "get-certificate-url")
 FUNCTIONS_LIST=$(supabase functions list --project-ref ${PROJECT_REF} --output json 2>/dev/null | jq -r '.[].slug' 2>/dev/null || echo "")
 TARGET_EDGE_FUNCTIONS=0
 for func in "${EXPECTED_FUNCTIONS[@]}"; do

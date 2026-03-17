@@ -42,14 +42,33 @@ else
 fi
 cd "${FUNC_BASE}"
 
-# If first arg is a function dir (e.g. change-password), deploy only that; else deploy all
-if [ -d "supabase/functions/${1}" ] && [ -f "supabase/functions/${1}/index.ts" ]; then
+# If first arg contains a hyphen it's a function name; otherwise it's a project ref (deploy all).
+# Supabase project refs are 20-char alphanumeric strings with no hyphens.
+# Function names always contain hyphens (e.g. change-password, get-document-url).
+ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url")
+
+if [[ "$1" == *"-"* ]]; then
+    # Treat as a function name — validate it exists before proceeding
+    FUNC_PATH="supabase/functions/${1}"
+    if [ ! -d "${FUNC_PATH}" ] || [ ! -f "${FUNC_PATH}/index.ts" ]; then
+        echo -e "${RED}Error: Function '${1}' not found at ${FUNC_BASE}/${FUNC_PATH}${NC}"
+        echo ""
+        echo "Available functions:"
+        for f in "${ALL_FUNCTIONS[@]}"; do
+            if [ -f "supabase/functions/${f}/index.ts" ]; then
+                echo -e "  ${GREEN}✓${NC} ${f}"
+            else
+                echo -e "  ${YELLOW}✗${NC} ${f} (missing locally)"
+            fi
+        done
+        exit 1
+    fi
     SINGLE_FUNC="$1"
     shift
     FUNCTIONS=("${SINGLE_FUNC}")
     echo -e "${GREEN}Deploying only: ${SINGLE_FUNC}${NC}"
 else
-    FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications")
+    FUNCTIONS=("${ALL_FUNCTIONS[@]}")
 fi
 
 if [ $# -eq 0 ]; then

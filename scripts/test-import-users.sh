@@ -258,19 +258,21 @@ SUPABASE_URL="https://${PROJECT_REF}.supabase.co"
 ANON_KEY=$(supabase projects api-keys --project-ref "${PROJECT_REF}" 2>/dev/null | grep -i "anon.*public" | head -1 | awk '{print $NF}' || echo "")
 
 if [ -n "$ANON_KEY" ]; then
-    echo -e "${YELLOW}Vercel Configuration (for local testing):${NC}"
-    echo "Add this to your local .env.local:"
+    echo -e "${YELLOW}Point the learn app at this project (no app is deployed on the temp project):${NC}"
+    echo "  1. In the learn app directory, create or edit .env.local and add:"
     echo ""
-    echo "VITE_CLIENT_CONFIGS={\"default\":{\"clientId\":\"default\",\"supabaseUrl\":\"${SUPABASE_URL}\",\"supabaseAnonKey\":\"${ANON_KEY}\",\"displayName\":\"Test\"}}"
+    echo "     VITE_CLIENT_CONFIGS={\"default\":{\"clientId\":\"default\",\"supabaseUrl\":\"${SUPABASE_URL}\",\"supabaseAnonKey\":\"${ANON_KEY}\",\"displayName\":\"Test\"}}"
+    echo ""
+    echo "  2. From repo root:  cd learn && npm run dev"
+    echo "  3. Open the local URL (e.g. http://localhost:5173), log in as the test admin created above."
     echo ""
 fi
 
-echo -e "${YELLOW}Steps to test:${NC}"
-echo "  1. Open the app (dev environment or local with test config)"
-echo "  2. Navigate to Admin → Import Data → Import Users tab"
-echo "  3. Click 'Import Users' button to open the dialog"
-echo "  4. Upload the CSV file: ${TEST_CSV_FILE}"
-echo "  5. Review the import results and verify:"
+echo -e "${YELLOW}Steps to test the import:${NC}"
+echo "  1. With the learn app running locally against this project (see above),"
+echo "  2. In the app: Admin → Import Data → Import Users tab"
+echo "  3. Click 'Import Users' and upload the CSV: ${TEST_CSV_FILE}"
+echo "  4. Review the import results and verify:"
 echo "     ${GREEN}Positive cases (rows 1-5):${NC}"
 echo "       - Users are created successfully"
 echo "       - Departments are assigned correctly"
@@ -285,7 +287,7 @@ echo "       - Users with invalid roles are handled gracefully"
 echo "       - Users with invalid locations are handled gracefully"
 echo "       - Multiple invalid references show clear error messages"
 echo "       - Import continues processing remaining rows after errors"
-echo "  6. Check the database to verify:"
+echo "  5. Check the database to verify:"
 echo "     - Only valid users (rows 1-5) are created in profiles table"
 echo "     - Invalid users (rows 6-20) are NOT created or are marked with errors"
 echo "     - user_departments table has correct assignments for valid users"
@@ -294,7 +296,7 @@ echo "     - physical_location_access table has correct assignments for valid us
 echo "     - profiles.manager column has correct manager UUIDs for valid users"
 echo ""
 
-# Step 6: Verification queries
+# Verification queries
 echo -e "${YELLOW}Verification SQL Queries (run in Supabase SQL Editor):${NC}"
 echo ""
 cat <<'VERIFY_EOF'
