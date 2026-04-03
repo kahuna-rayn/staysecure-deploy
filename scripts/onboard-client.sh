@@ -11,6 +11,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Directory anchors — all supabase CLI commands must run from LEARN_DIR;
+# relative paths for backups/ and scripts/ stay anchored to DEPLOY_DIR.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LEARN_DIR="$(cd "${SCRIPT_DIR}/../../learn" && pwd)"
+
 # Configuration
 ENVIRONMENT=${1:-prod}  # prod, staging, dev (demo is a data-type, not an environment)
 CLIENT_NAME_PARAM=${2:-""}
@@ -78,85 +84,96 @@ else
     echo -e "${YELLOW}Warning: No .env or .env.local file found. Make sure environment variables are set.${NC}"
 fi
 
-# Create Supabase project
-echo -e "${GREEN}Creating Supabase project...${NC}"
 # Use PGPASSWORD for both Supabase CLI and psql
 if [ -z "$PGPASSWORD" ]; then
     echo -e "${RED}Error: PGPASSWORD environment variable is not set${NC}"
     echo "Please set PGPASSWORD in your environment or .zshrc"
-    echo ""
-    echo -e "${YELLOW}Note: For new Supabase projects, the database password is set during project creation.${NC}"
-    echo -e "${YELLOW}      You can reset it later in Supabase Dashboard → Settings → Database → Database Password${NC}"
     exit 1
 fi
 
-echo "Using PGPASSWORD for database operations"
-echo -e "${YELLOW}Note: The database password is set during project creation.${NC}"
-echo -e "${YELLOW}      To reset it later: Supabase Dashboard → Settings → Database → Database Password${NC}"
-echo ""
-
-# Determine project name
-# For staging/dev: always use just the environment name (staging, dev)
-# For prod: use CLIENT_NAME-ENVIRONMENT format if different, otherwise just CLIENT_NAME
-if [ "$ENVIRONMENT" = "staging" ] || [ "$ENVIRONMENT" = "dev" ]; then
-    PROJECT_NAME="${ENVIRONMENT}"
+# If PROJECT_REF is already set (env var), skip project creation and restore to existing project
+if [ -n "$PROJECT_REF" ]; then
+    echo -e "${YELLOW}PROJECT_REF=${PROJECT_REF} — skipping project creation, restoring to existing project${NC}"
 else
-    # Production: if CLIENT_NAME equals ENVIRONMENT, just use CLIENT_NAME
-    # Otherwise use CLIENT_NAME-ENVIRONMENT format
-    if [ "$CLIENT_NAME" = "$ENVIRONMENT" ]; then
-        PROJECT_NAME="${CLIENT_NAME}"
+    # Create Supabase project
+    echo -e "${GREEN}Creating Supabase project...${NC}"
+    echo "Using PGPASSWORD for database operations"
+    echo -e "${YELLOW}Note: The database password is set during project creation.${NC}"
+    echo -e "${YELLOW}      To reset it later: Supabase Dashboard → Settings → Database → Database Password${NC}"
+    echo ""
+
+    # Determine project name
+    if [ "$ENVIRONMENT" = "staging" ] || [ "$ENVIRONMENT" = "dev" ]; then
+        PROJECT_NAME="${ENVIRONMENT}"
     else
-        PROJECT_NAME="${CLIENT_NAME}-${ENVIRONMENT}"
+        if [ "$CLIENT_NAME" = "$ENVIRONMENT" ]; then
+            PROJECT_NAME="${CLIENT_NAME}"
+        else
+            PROJECT_NAME="${CLIENT_NAME}-${ENVIRONMENT}"
+        fi
     fi
-fi
 
-echo "Creating project with name: '${PROJECT_NAME}'"
-echo "Region: ${REGION}"
-echo "Org ID: ${SUPABASE_ORG_ID}"
-PROJECT_REF=$(supabase projects create "${PROJECT_NAME}" --region ${REGION} --org-id ${SUPABASE_ORG_ID} --db-password "${PGPASSWORD}" --output json | jq -r '.id')
+    echo "Creating project with name: '${PROJECT_NAME}'"
+    echo "Region: ${REGION}"
+    echo "Org ID: ${SUPABASE_ORG_ID}"
+    PROJECT_REF=$(supabase projects create "${PROJECT_NAME}" --region ${REGION} --org-id ${SUPABASE_ORG_ID} --db-password "${PGPASSWORD}" --output json | jq -r '.id')
 
-if [ -z "$PROJECT_REF" ] || [ "$PROJECT_REF" = "null" ]; then
-    echo -e "${RED}Failed to create Supabase project${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Created project: ${PROJECT_REF}${NC}"
-
-# Wait for project to be ready
-echo -e "${GREEN}Waiting for project to be ready...${NC}"
-echo "This may take 2-3 minutes for the database to be fully initialized..."
-
-# Check project status and wait until it's ready
-MAX_ATTEMPTS=30
-ATTEMPT=0
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    STATUS=$(supabase projects list --output json | jq -r ".[] | select(.id == \"${PROJECT_REF}\") | .status")
-    echo "Project status: $STATUS (attempt $((ATTEMPT + 1))/$MAX_ATTEMPTS)"
-    
-    if [ "$STATUS" = "Active" ] || [ "$STATUS" = "ACTIVE_HEALTHY" ]; then
-        echo -e "${GREEN}Project is ready!${NC}"
-        break
-    fi
-    
-    if [ $ATTEMPT -eq $((MAX_ATTEMPTS - 1)) ]; then
-        echo -e "${RED}Project did not become ready within expected time${NC}"
+    if [ -z "$PROJECT_REF" ] || [ "$PROJECT_REF" = "null" ]; then
+        echo -e "${RED}Failed to create Supabase project${NC}"
         exit 1
     fi
-    
-    sleep 10
-    ATTEMPT=$((ATTEMPT + 1))
-done
+
+    echo -e "${GREEN}Created project: ${PROJECT_REF}${NC}"
+
+    # Wait for project to be ready
+    echo -e "${GREEN}Waiting for project to be ready...${NC}"
+    echo "This may take 2-3 minutes for the database to be fully initialized..."
+
+    MAX_ATTEMPTS=30
+    ATTEMPT=0
+    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+        STATUS=$(supabase projects list --output json | jq -r ".[] | select(.id == \"${PROJECT_REF}\") | .status")
+        echo "Project status: $STATUS (attempt $((ATTEMPT + 1))/$MAX_ATTEMPTS)"
+
+        if [ "$STATUS" = "Active" ] || [ "$STATUS" = "ACTIVE_HEALTHY" ]; then
+            echo -e "${GREEN}Project is ready!${NC}"
+            break
+        fi
+
+        if [ $ATTEMPT -eq $((MAX_ATTEMPTS - 1)) ]; then
+            echo -e "${RED}Project did not become ready within expected time${NC}"
+            exit 1
+        fi
+
+        sleep 10
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+fi
 
 # Link to the project (now that it's ready)
 # Note: This is optional for cloud-only operations, but some CLI commands may require it
 # If Docker is not available, this will fail but we continue anyway
 echo -e "${GREEN}Linking to project...${NC}"
+pushd "${LEARN_DIR}" > /dev/null
 supabase link --project-ref ${PROJECT_REF} 2>/dev/null || {
     echo -e "${YELLOW}Warning: Could not link project (Docker may not be running, but continuing anyway)${NC}"
 }
+popd > /dev/null
 
-# Prepare direct Postgres connection string (bypass pooler for admin operations)
-CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+# Detect connection method: direct IPv6 or session-mode pooler fallback
+# Newer Supabase projects use IPv6-only direct connections; fall back to pooler when IPv6 routing unavailable
+DB_HOSTNAME="db.${PROJECT_REF}.supabase.co"
+POOLER_HOST="${POOLER_HOST:-aws-1-${REGION:-ap-southeast-1}.pooler.supabase.com}"
+RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v "^\." | head -1)
+if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+    export PGHOSTADDR="${RESOLVED_ADDR}"
+    PG_HOST="${DB_HOSTNAME}"; PG_PORT=6543; PG_USER="postgres"
+    echo -e "${GREEN}Using direct connection (IPv6): ${RESOLVED_ADDR}${NC}"
+else
+    PG_HOST="${POOLER_HOST}"; PG_PORT=5432; PG_USER="postgres.${PROJECT_REF}"
+    echo -e "${YELLOW}Direct connection unavailable — using pooler: ${POOLER_HOST}${NC}"
+fi
+CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
 
 # Restore from backup (if available) or apply schema files
 # Check for custom format dumps first, then fall back to SQL format
@@ -170,13 +187,13 @@ if [ -f "backups/schema.dump" ]; then
     
     # Create connection string using direct database connection (not pooler)
     # PGPASSWORD environment variable will be used for authentication
-    CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+    CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
 
     # Restore schema using pg_restore (custom format preserves dependencies and metadata better)
     echo -e "${GREEN}Restoring schema from custom format dump...${NC}"
     # Note: --clean --if-exists may show errors on fresh databases (trying to drop non-existent objects)
     # These errors are safe to ignore, but we'll capture them in the log
-    pg_restore --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+    pg_restore --host=${PG_HOST} --port=${PG_PORT} --username=${PG_USER} \
         --dbname=postgres \
         --verbose \
         --no-owner \
@@ -190,7 +207,7 @@ if [ -f "backups/schema.dump" ]; then
     # Restore storage schema if it exists
     if [ -f "backups/storage.dump" ]; then
         echo -e "${GREEN}Restoring storage schema...${NC}"
-        pg_restore --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+        pg_restore --host=${PG_HOST} --port=${PG_PORT} --username=${PG_USER} \
             --dbname=postgres \
             --verbose \
             --no-owner \
@@ -201,17 +218,9 @@ if [ -f "backups/schema.dump" ]; then
             }
     fi
     
-    # Create required storage buckets (idempotent — safe to re-run)
+    # Create required storage buckets via create-storage.sh (single source of truth for bucket config)
     echo -e "${GREEN}Ensuring storage buckets exist...${NC}"
-    psql "${CONNECTION_STRING}" --command "
-        INSERT INTO storage.buckets (id, name, public, file_size_limit)
-        VALUES
-            ('avatars',      'avatars',      true,  2097152),
-            ('documents',    'documents',    false, 10485760),
-            ('certificates', 'certificates', false, 10485760),
-            ('logos',        'logos',        true,  2097152)
-        ON CONFLICT (id) DO NOTHING;
-    " || {
+    POOLER_HOST="${POOLER_HOST}" REGION="${REGION}" "${SCRIPT_DIR}/create-storage.sh" "${PROJECT_REF}" || {
         echo -e "${YELLOW}Warning: Failed to create storage buckets (may already exist)${NC}"
     }
 
@@ -222,7 +231,7 @@ if [ -f "backups/schema.dump" ]; then
         # Restore auth.users first (needed for foreign key constraints with profiles and user_roles)
         if [ -f "backups/auth.dump" ]; then
             echo -e "${GREEN}Restoring auth.users...${NC}"
-            pg_restore --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+            pg_restore --host=${PG_HOST} --port=${PG_PORT} --username=${PG_USER} \
                 --dbname=postgres \
                 --verbose \
                 --no-owner \
@@ -238,7 +247,7 @@ if [ -f "backups/schema.dump" ]; then
         # Restore all demo data from public schema (auth.users already restored from auth.dump)
         # Using --schema=public excludes auth.users which is in auth schema
         echo -e "${GREEN}Restoring demo data (public schema only, excluding auth.users)...${NC}"
-        pg_restore --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+        pg_restore --host=${PG_HOST} --port=${PG_PORT} --username=${PG_USER} \
             --dbname=postgres \
             --verbose \
             --no-owner \
@@ -251,7 +260,7 @@ if [ -f "backups/schema.dump" ]; then
         echo -e "${GREEN}✓ Demo data restored successfully${NC}"
     elif [ "$DATA_TYPE" = "seed" ] && [ -f "backups/seed.dump" ]; then
         echo -e "${GREEN}Restoring seed data (reference data only) from custom format...${NC}"
-        pg_restore --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+        pg_restore --host=${PG_HOST} --port=${PG_PORT} --username=${PG_USER} \
             --dbname=postgres \
             --verbose \
             --no-owner \
@@ -283,7 +292,7 @@ if [ -f "backups/schema.dump" ]; then
     else
         echo -e "${YELLOW}Warning: No data backup found (demo.dump/seed.dump or demo.sql/seed.sql), skipping data restoration${NC}"
     fi
-    
+
     # Apply post-migration fixes (fixes that aren't in the schema dump, including RLS policies, permissions, and triggers)
     # This includes the on_auth_user_created trigger
     if [ -f "scripts/post-migration-fixes.sql" ]; then
@@ -327,7 +336,7 @@ elif [ -f "backups/schema.sql" ]; then
     
     # Create connection string using direct database connection (not pooler)
     # PGPASSWORD environment variable will be used for authentication
-    CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+    CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
 
     # Restore schema
     echo -e "${GREEN}Restoring schema from SQL...${NC}"
@@ -409,20 +418,23 @@ else
         "07_triggers.sql"
     )
 
+    pushd "${LEARN_DIR}" > /dev/null
     for file in "${FILES[@]}"; do
-        if [ -f "$file" ]; then
+        if [ -f "${DEPLOY_DIR}/$file" ]; then
             echo "Applying $file..."
-            supabase db execute --file "$file" --project-ref ${PROJECT_REF} || {
+            supabase db execute --file "${DEPLOY_DIR}/$file" --project-ref ${PROJECT_REF} || {
                 echo -e "${RED}Failed to apply $file${NC}"
+                popd > /dev/null
                 exit 1
             }
         else
             echo -e "${YELLOW}Warning: $file not found${NC}"
         fi
     done
+    popd > /dev/null
     
     # Apply post-migration fixes (fixes that aren't in the schema dump, including RLS policies, permissions, and triggers)
-    CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+    CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
     if [ -f "scripts/post-migration-fixes.sql" ]; then
         echo -e "${GREEN}Applying post-migration fixes...${NC}"
         psql "${CONNECTION_STRING}" \
@@ -464,16 +476,11 @@ REQUIRED_VARS=(
     "DEEPL_API_KEY"
     "APP_BASE_URL"
     "MANAGER_NOTIFICATION_COOLDOWN_HOURS"
+    "ANTHROPIC_API_KEY"
+    "CERT_RENDERER_URL"
+    "CERT_RENDER_SECRET"
 )
 
-# Certificate renderer secrets (optional — warn if not set)
-if [ -z "$CERT_RENDERER_URL" ]; then
-    echo -e "${YELLOW}Warning: CERT_RENDERER_URL not set — certificate PDF generation will not work${NC}"
-    echo -e "${YELLOW}  Set to the Vercel deployment URL of the certificate-renderer project${NC}"
-fi
-if [ -z "$CERT_RENDER_SECRET" ]; then
-    echo -e "${YELLOW}Warning: CERT_RENDER_SECRET not set — certificate PDF generation will not work${NC}"
-fi
 
 MISSING_VARS=()
 for var in "${REQUIRED_VARS[@]}"; do
@@ -488,6 +495,8 @@ if [ ${#MISSING_VARS[@]} -ne 0 ]; then
     echo -e "${YELLOW}Please set these variables before running the script${NC}"
     exit 1
 fi
+
+pushd "${LEARN_DIR}" > /dev/null
 
 echo -e "${GREEN}Setting Edge Function secrets...${NC}"
 # Note: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are automatically provided by Supabase
@@ -511,20 +520,20 @@ if [ -n "$CERT_RENDERER_URL" ] && [ -n "$CERT_RENDER_SECRET" ]; then
     echo -e "${GREEN}✓ Certificate renderer secrets set${NC}"
 fi
 
+# Set Anthropic API key (if provided)
+if [ -n "$ANTHROPIC_API_KEY" ]; then
+    supabase secrets set \
+        ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY} \
+        --project-ref ${PROJECT_REF}
+    echo -e "${GREEN}✓ Anthropic API key set${NC}"
+fi
+
 # Deploy Edge Functions (not included in database dumps)
+# Delegates to deploy-functions.sh so this list never gets out of sync.
 echo -e "${GREEN}Deploying Edge Functions...${NC}"
-supabase functions deploy create-user --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy delete-user --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy send-email --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy send-lesson-reminders --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy send-password-reset --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy update-user-password --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy translate-lesson --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy translation-status --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy get-document-url --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy process-scheduled-notifications --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy generate-certificate --no-verify-jwt --project-ref ${PROJECT_REF}
-supabase functions deploy get-certificate-url --no-verify-jwt --project-ref ${PROJECT_REF}
+"${SCRIPT_DIR}/deploy-functions.sh" "${PROJECT_REF}"
+
+popd > /dev/null
 
 # Ensure pg_cron is enabled and schedule manager notification job
 echo -e "${GREEN}Configuring manager notification cron job...${NC}"
@@ -681,9 +690,9 @@ fi
 echo ""
 echo -e "${GREEN}Verifying restore completeness...${NC}"
 
-# Get source project reference (dev/reference project)
-SOURCE_PROJECT_REF="cleqfnrbiqpxpzxkatda"
-CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+# Get source project reference (dev/reference project) — use env var, fall back to known dev ref
+SOURCE_PROJECT_REF="${DEV_PROJECT_REF:-cleqfnrbiqpxpzxkatda}"
+CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
 
 # Collect counts from target (newly restored) database
 echo "Collecting object counts from target database..."
@@ -703,7 +712,7 @@ TARGET_AUTH_USER_TRIGGER=$(psql "${CONNECTION_STRING}" -t -c "SELECT EXISTS(SELE
 [ "$TARGET_AUTH_USER_TRIGGER" = "t" ] && TARGET_AUTH_USER_TRIGGER="Yes" || TARGET_AUTH_USER_TRIGGER="No"
 
 # Check edge functions
-EXPECTED_FUNCTIONS=("create-user" "delete-user" "send-email" "send-password-reset" "update-password" "update-user-password" "translate-lesson" "translation-status" "get-document-url" "process-scheduled-notifications" "generate-certificate" "get-certificate-url")
+EXPECTED_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "update-password" "update-user-password" "change-password" "request-activation-link" "translate-lesson" "translate-track" "translation-status" "get-document-url" "get-user-last-logins" "process-scheduled-notifications" "generate-certificate" "get-certificate-url" "generate-lesson" "sync-lesson-content" "org-api" "org-webhook-publisher")
 FUNCTIONS_LIST=$(supabase functions list --project-ref ${PROJECT_REF} --output json 2>/dev/null | jq -r '.[].slug' 2>/dev/null || echo "")
 TARGET_EDGE_FUNCTIONS=0
 for func in "${EXPECTED_FUNCTIONS[@]}"; do
@@ -724,7 +733,7 @@ done
 
 # Collect counts from source (reference) database
 echo "Collecting object counts from source database (dev)..."
-SOURCE_CONNECTION_STRING="host=db.${SOURCE_PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+SOURCE_CONNECTION_STRING="host=${POOLER_HOST} port=5432 user=postgres.${SOURCE_PROJECT_REF} dbname=postgres sslmode=require"
 SOURCE_TABLES=$(psql "${SOURCE_CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';" 2>&1 | grep -v "ERROR" | tr -d ' \n')
 SOURCE_POLICIES=$(psql "${SOURCE_CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM pg_policies WHERE schemaname = 'public';" 2>&1 | grep -v "ERROR" | tr -d ' \n')
 SOURCE_FUNCTIONS=$(psql "${SOURCE_CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace;" 2>&1 | grep -v "ERROR" | tr -d ' \n')
@@ -912,8 +921,8 @@ if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "staging" ]; then
     echo -e "  https://${CLIENT_DOMAIN}/activate-account"
     echo -e "${YELLOW}Note: For single-client environments, URLs don't need /${CLIENT_NAME} prefix${NC}"
 else
-    echo -e "  https://${CLIENT_DOMAIN}/${CLIENT_NAME}/reset-password"
-    echo -e "  https://${CLIENT_DOMAIN}/${CLIENT_NAME}/activate-account"
+    echo -e "  https://${BASE_DOMAIN}/${CLIENT_NAME}/reset-password"
+    echo -e "  https://${BASE_DOMAIN}/${CLIENT_NAME}/activate-account"
     echo -e "${YELLOW}Note: For production, URLs require /${CLIENT_NAME} prefix${NC}"
 fi
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
@@ -1062,8 +1071,8 @@ if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "staging" ]; then
     echo "       - https://${CLIENT_DOMAIN}/reset-password"
     echo "       - https://${CLIENT_DOMAIN}/activate-account"
 else
-    echo "       - https://${CLIENT_DOMAIN}/${CLIENT_NAME}/reset-password"
-    echo "       - https://${CLIENT_DOMAIN}/${CLIENT_NAME}/activate-account"
+    echo "       - https://${BASE_DOMAIN}/${CLIENT_NAME}/reset-password"
+    echo "       - https://${BASE_DOMAIN}/${CLIENT_NAME}/activate-account"
 fi
 echo "  2. Copy the client configuration JSON above"
 echo "  3. Update Vercel environment variable VITE_CLIENT_CONFIGS"
@@ -1078,9 +1087,16 @@ echo "  4. Redeploy Vercel project"
 if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "staging" ]; then
     echo "  5. Test access at: https://${CLIENT_DOMAIN} (root path should work)"
 else
-    echo "  5. Test access at: https://${CLIENT_DOMAIN}/${CLIENT_NAME}"
+    echo "  5. Test access at: https://${BASE_DOMAIN}/${CLIENT_NAME}"
     echo "  6. Verify root path (/) shows error (this is expected and correct)"
 fi
 echo "  7. Create admin user using: ./scripts/create-admin-user.sh ${PROJECT_REF} <email> <password> [full-name] [first-name] [last-name]"
 echo "  8. Test user creation and email sending"
+echo "  9. Sync lesson content from master:"
+echo "     • Open the Learn app connected to the MASTER database"
+echo "     • Go to Admin → Lesson Sync"
+echo "     • Select all learning tracks and this client (${CLIENT_NAME})"
+echo "     • Click Sync — this populates lessons, tracks, and media from master"
+echo "     NOTE: The seed only contains reference data (languages, email templates, etc.)."
+echo "           Lesson content is NOT seeded — it must come from master via sync."
 
