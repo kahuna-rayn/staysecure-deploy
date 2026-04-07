@@ -25,9 +25,11 @@ supabase_cmd() {
 if [ $# -eq 0 ]; then
     echo -e "${RED}Error: At least one project reference is required${NC}"
     echo "Usage: ./deploy-functions.sh [function-name] <project-ref> [project-ref2] ..."
-    echo "  Deploy all functions:  ./deploy-functions.sh REF1 REF2"
-    echo "  Deploy one function:   ./deploy-functions.sh change-password REF1 REF2"
-    echo "  List function names:   ./deploy-functions.sh --list"
+    echo "  Deploy all functions:        ./deploy-functions.sh REF1 REF2"
+    echo "  Deploy one function:         ./deploy-functions.sh change-password REF1 REF2"
+    echo "  Deploy to all prod projects: ./deploy-functions.sh --all-production"
+    echo "  Deploy to every project:     ./deploy-functions.sh --all"
+    echo "  List function names:         ./deploy-functions.sh --list"
     exit 1
 fi
 
@@ -53,6 +55,38 @@ ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" 
 if [ "$1" = "--list" ]; then
     for f in "${ALL_FUNCTIONS[@]}"; do echo "$f"; done
     exit 0
+fi
+
+# Expand --all-production / --all into project ref lists (bash 3.2 compatible)
+if [ "$1" = "--all-production" ]; then
+    echo -e "${GREEN}Querying Supabase for production projects (*-prod)...${NC}"
+    RESOLVED=()
+    while IFS= read -r ref; do
+        [ -n "$ref" ] && RESOLVED+=("$ref")
+    done < <(supabase projects list --output json 2>/dev/null \
+        | jq -r '.[] | select(.name | endswith("-prod")) | .id')
+    if [ ${#RESOLVED[@]} -eq 0 ]; then
+        echo -e "${RED}Error: No projects with names ending in '-prod' found.${NC}"; exit 1
+    fi
+    echo -e "${GREEN}Found ${#RESOLVED[@]} production project(s):${NC}"
+    supabase projects list --output json 2>/dev/null \
+        | jq -r '.[] | select(.name | endswith("-prod")) | "  \(.id)  \(.name)"'
+    echo ""
+    set -- "${RESOLVED[@]}"
+elif [ "$1" = "--all" ]; then
+    echo -e "${GREEN}Querying Supabase for all projects...${NC}"
+    RESOLVED=()
+    while IFS= read -r ref; do
+        [ -n "$ref" ] && RESOLVED+=("$ref")
+    done < <(supabase projects list --output json 2>/dev/null | jq -r '.[].id')
+    if [ ${#RESOLVED[@]} -eq 0 ]; then
+        echo -e "${RED}Error: No projects found.${NC}"; exit 1
+    fi
+    echo -e "${GREEN}Found ${#RESOLVED[@]} project(s):${NC}"
+    supabase projects list --output json 2>/dev/null \
+        | jq -r '.[] | "  \(.id)  \(.name)"'
+    echo ""
+    set -- "${RESOLVED[@]}"
 fi
 
 if [[ "$1" == *"-"* ]]; then

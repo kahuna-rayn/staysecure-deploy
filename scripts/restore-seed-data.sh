@@ -17,7 +17,6 @@
 #   After onboarding, run SyncManager to push master lesson content to this client.
 #
 # Excluded (user-specific data, not seed):
-# - email_preferences (has column defaults, function handles missing rows with COALESCE)
 # - email_notifications (user-specific notifications)
 # - learning_track_assignments, learning_track_department_assignments, learning_track_role_assignments (user-specific)
 # - user_learning_track_progress, user_lesson_progress (user-specific)
@@ -135,6 +134,8 @@ if [ "$FORMAT" = "custom" ]; then
     echo "  11. template_variable_translations (depends on template_variables + languages)"
     echo "  12. email_layouts (independent)"
     echo "  13. email_templates (depends on email_layouts)"
+    echo "  14. notification_rules (depends on email_templates)"
+    echo "  15. email_preferences (org-level row only, user_id IS NULL)"
     
     # Try to get source row counts from dev database if available
     echo ""
@@ -312,6 +313,26 @@ ALTER TABLE public.lesson_node_translations ENABLE TRIGGER update_translation_co
 EOF
 )
 
+# Step 6: Seed email_preferences (org-level row) and ensure notification_rules are current
+# This is idempotent — WHERE NOT EXISTS guards prevent duplicates on re-runs.
+# email_preferences is NOT in the binary dump (user rows must stay out); this is the
+# authoritative source for the org-level master switch and notification_rules.
+echo "  Step 6: Seeding email_preferences and notification_rules via seed_email_templates.sql..."
+SEED_EMAIL_TEMPLATES_SQL="$(dirname "$0")/../../notifications/supabase/seed_email_templates.sql"
+if [ -f "${SEED_EMAIL_TEMPLATES_SQL}" ]; then
+    (unset PGOPTIONS; PGPASSWORD="${PGPASSWORD}" psql "${CONNECTION_STRING}" \
+        --single-transaction \
+        --variable ON_ERROR_STOP=1 \
+        --file "${SEED_EMAIL_TEMPLATES_SQL}" 2>&1 | grep -v "^$" || {
+            echo -e "${RED}Error: Failed to seed email_preferences / notification_rules${NC}"
+            exit 1
+        })
+    echo -e "${GREEN}  ✓ email_preferences and notification_rules seeded${NC}"
+else
+    echo -e "${YELLOW}  Warning: seed_email_templates.sql not found at ${SEED_EMAIL_TEMPLATES_SQL}${NC}"
+    echo -e "${YELLOW}           email_preferences org-level row will be missing${NC}"
+fi
+
 # Verify restoration by checking all seed tables
 # Use direct connection (5432) for verification to ensure we see committed data
 # Pooler (6543) might have transaction isolation issues
@@ -329,6 +350,8 @@ TEMPLATE_VARIABLES_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_
 TEMPLATE_VARIABLE_TRANSLATIONS_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRING}" -tAc "SELECT COUNT(*) FROM public.template_variable_translations;" 2>/dev/null | tr -d ' ' || echo "0")
 EMAIL_TEMPLATES_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRING}" -tAc "SELECT COUNT(*) FROM public.email_templates;" 2>/dev/null | tr -d ' ' || echo "0")
 EMAIL_LAYOUTS_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRING}" -tAc "SELECT COUNT(*) FROM public.email_layouts;" 2>/dev/null | tr -d ' ' || echo "0")
+NOTIFICATION_RULES_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRING}" -tAc "SELECT COUNT(*) FROM public.notification_rules;" 2>/dev/null | tr -d ' ' || echo "0")
+EMAIL_PREFERENCES_ORG_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRING}" -tAc "SELECT COUNT(*) FROM public.email_preferences WHERE user_id IS NULL;" 2>/dev/null | tr -d ' ' || echo "0")
 
 # Get source counts for comparison if available
 DEV_PROJECT_REF="cleqfnrbiqpxpzxkatda"
@@ -346,6 +369,8 @@ SOURCE_TEMPLATE_VARIABLES_COUNT="?"
 SOURCE_TEMPLATE_VARIABLE_TRANSLATIONS_COUNT="?"
 SOURCE_EMAIL_TEMPLATES_COUNT="?"
 SOURCE_EMAIL_LAYOUTS_COUNT="?"
+SOURCE_NOTIFICATION_RULES_COUNT="?"
+SOURCE_EMAIL_PREFERENCES_ORG_COUNT="?"
 
 if [ -n "$PGPASSWORD" ]; then
     SOURCE_LANGUAGE_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.languages WHERE is_active = true;" 2>/dev/null | tr -d ' ' || echo "?")
@@ -361,6 +386,8 @@ if [ -n "$PGPASSWORD" ]; then
     SOURCE_TEMPLATE_VARIABLE_TRANSLATIONS_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.template_variable_translations;" 2>/dev/null | tr -d ' ' || echo "?")
     SOURCE_EMAIL_TEMPLATES_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.email_templates;" 2>/dev/null | tr -d ' ' || echo "?")
     SOURCE_EMAIL_LAYOUTS_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.email_layouts;" 2>/dev/null | tr -d ' ' || echo "?")
+    SOURCE_NOTIFICATION_RULES_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.notification_rules;" 2>/dev/null | tr -d ' ' || echo "?")
+    SOURCE_EMAIL_PREFERENCES_ORG_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.email_preferences WHERE user_id IS NULL;" 2>/dev/null | tr -d ' ' || echo "?")
 fi
 
 # Print comparison table
@@ -395,6 +422,8 @@ compare_counts "template_variables" "$SOURCE_TEMPLATE_VARIABLES_COUNT" "${TEMPLA
 compare_counts "template_variable_translations" "$SOURCE_TEMPLATE_VARIABLE_TRANSLATIONS_COUNT" "${TEMPLATE_VARIABLE_TRANSLATIONS_COUNT:-0}"
 compare_counts "email_templates" "$SOURCE_EMAIL_TEMPLATES_COUNT" "${EMAIL_TEMPLATES_COUNT:-0}"
 compare_counts "email_layouts" "$SOURCE_EMAIL_LAYOUTS_COUNT" "${EMAIL_LAYOUTS_COUNT:-0}"
+compare_counts "notification_rules" "$SOURCE_NOTIFICATION_RULES_COUNT" "${NOTIFICATION_RULES_COUNT:-0}"
+compare_counts "email_preferences (org row)" "$SOURCE_EMAIL_PREFERENCES_ORG_COUNT" "${EMAIL_PREFERENCES_ORG_COUNT:-0}"
 
 # Check for critical failures
 CRITICAL_ERRORS=$(grep -E "function generate_content_hash.*does not exist" /tmp/restore-seed.log 2>/dev/null | wc -l | tr -d ' ' || echo "0")
@@ -414,6 +443,8 @@ TABLES_WITH_DATA=0
 [ "${TEMPLATE_VARIABLE_TRANSLATIONS_COUNT:-0}" -gt 0 ] && TABLES_WITH_DATA=$((TABLES_WITH_DATA + 1))
 [ "${EMAIL_TEMPLATES_COUNT:-0}" -gt 0 ] && TABLES_WITH_DATA=$((TABLES_WITH_DATA + 1))
 [ "${EMAIL_LAYOUTS_COUNT:-0}" -gt 0 ] && TABLES_WITH_DATA=$((TABLES_WITH_DATA + 1))
+[ "${NOTIFICATION_RULES_COUNT:-0}" -gt 0 ] && TABLES_WITH_DATA=$((TABLES_WITH_DATA + 1))
+[ "${EMAIL_PREFERENCES_ORG_COUNT:-0}" -gt 0 ] && TABLES_WITH_DATA=$((TABLES_WITH_DATA + 1))
 
 if [ "$CRITICAL_ERRORS" -gt 0 ]; then
     echo -e "${RED}✗ Restore FAILED - function errors detected${NC}"
@@ -424,11 +455,11 @@ elif [ "${LANGUAGE_COUNT:-0}" -eq 0 ] && [ "${LESSONS_COUNT:-0}" -eq 0 ]; then
     echo -e "${RED}✗ Restore FAILED - no data found in key tables${NC}"
     echo -e "${YELLOW}  Review /tmp/restore-seed.log for details${NC}"
     exit 1
-elif [ "$TABLES_WITH_DATA" -lt 10 ]; then
-    echo -e "${YELLOW}⚠ Restore PARTIAL - only ${TABLES_WITH_DATA}/13 tables have data${NC}"
+elif [ "$TABLES_WITH_DATA" -lt 12 ]; then
+    echo -e "${YELLOW}⚠ Restore PARTIAL - only ${TABLES_WITH_DATA}/15 tables have data${NC}"
     echo -e "${YELLOW}  Review /tmp/restore-seed.log for details${NC}"
 else
-    echo -e "${GREEN}✓ Seed data restored successfully (${TABLES_WITH_DATA}/13 tables have data)${NC}"
+    echo -e "${GREEN}✓ Seed data restored successfully (${TABLES_WITH_DATA}/15 tables have data)${NC}"
 fi
 
 # Show summary comparison (we can't get source row counts from custom format easily)
@@ -449,6 +480,8 @@ if [ "${TEMPLATE_VARIABLES_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES
 if [ "${TEMPLATE_VARIABLE_TRANSLATIONS_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES} template_variable_translations"; fi
 if [ "${EMAIL_TEMPLATES_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES} email_templates"; fi
 if [ "${EMAIL_LAYOUTS_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES} email_layouts"; fi
+if [ "${NOTIFICATION_RULES_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES} notification_rules"; fi
+if [ "${EMAIL_PREFERENCES_ORG_COUNT:-0}" -eq 0 ]; then EMPTY_TABLES="${EMPTY_TABLES} email_preferences(org)"; fi
 
 if [ -n "$EMPTY_TABLES" ]; then
     echo -e "${YELLOW}Empty tables:${EMPTY_TABLES}${NC}"

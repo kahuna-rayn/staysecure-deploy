@@ -568,100 +568,14 @@ popd > /dev/null
 # Ensure pg_cron is enabled and schedule manager notification job
 echo -e "${GREEN}Configuring manager notification cron job...${NC}"
 
-# Get the service role key for this project (if not provided, fetch it)
-if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-    echo -e "${YELLOW}Service role key not provided, fetching from project...${NC}"
-    SUPABASE_SERVICE_ROLE_KEY=$(supabase projects api-keys --project-ref ${PROJECT_REF} | grep 'service_role' | awk '{print $3}')
-    if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-        echo -e "${RED}Error: Could not retrieve service role key for project ${PROJECT_REF}${NC}"
-        exit 1
-    fi
-fi
-
-FUNCTION_URL="https://${PROJECT_REF}.supabase.co/functions/v1/process-scheduled-notifications"
-# Escape single quotes in the auth header for SQL
-AUTH_HEADER_ESCAPED=$(echo "Bearer ${SUPABASE_SERVICE_ROLE_KEY}" | sed "s/'/''/g")
-FUNCTION_URL_ESCAPED=$(echo "${FUNCTION_URL}" | sed "s/'/''/g")
-
-psql "${CONNECTION_STRING}" <<SQL
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
-DO \$\$
-BEGIN
-  PERFORM cron.unschedule('process-manager-notifications');
-EXCEPTION
-  WHEN others THEN NULL;
-END
-\$\$;
-SELECT cron.schedule(
-  'process-manager-notifications',
-  '0 1 * * *',
-  format(
-    \$cron\$
-      SELECT net.http_post(
-        url := %L,
-        headers := jsonb_build_object(
-          'Content-Type', 'application/json',
-          'Authorization', %L
-        ),
-        body := jsonb_build_object(
-          'notification_type', 'manager_employee_incomplete'
-        )
-      );
-    \$cron\$,
-    '${FUNCTION_URL_ESCAPED}',
-    '${AUTH_HEADER_ESCAPED}'
-  )
-) AS cron_job_id;
-SQL
+# Delegate all cron job setup to setup-cron-jobs.sh (single source of truth)
+echo -e "${GREEN}Configuring pg_cron scheduled jobs...${NC}"
+"${SCRIPT_DIR}/setup-cron-jobs.sh" "${PROJECT_REF}"
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Error configuring pg_cron job${NC}"
+    echo -e "${RED}Error configuring pg_cron jobs${NC}"
     exit 1
 fi
-
-echo -e "${GREEN}✓ Manager notification cron job scheduled (UTC 01:00 daily)${NC}"
-
-# Schedule lesson reminders cron job
-echo -e "${GREEN}Configuring lesson reminders cron job...${NC}"
-
-LESSON_REMINDERS_FUNCTION_URL="https://${PROJECT_REF}.supabase.co/functions/v1/send-lesson-reminders"
-LESSON_REMINDERS_FUNCTION_URL_ESCAPED=$(echo "${LESSON_REMINDERS_FUNCTION_URL}" | sed "s/'/''/g")
-
-psql "${CONNECTION_STRING}" <<SQL
-DO \$\$
-BEGIN
-  PERFORM cron.unschedule('send-daily-lesson-reminders');
-EXCEPTION
-  WHEN others THEN NULL;
-END
-\$\$;
-SELECT cron.schedule(
-  'send-daily-lesson-reminders',
-  '0 9 * * *',
-  format(
-    \$cron\$
-      SELECT net.http_post(
-        url := %L,
-        headers := jsonb_build_object(
-          'Content-Type', 'application/json',
-          'Authorization', %L
-        ),
-        body := '{}'::jsonb
-      );
-    \$cron\$,
-    '${LESSON_REMINDERS_FUNCTION_URL_ESCAPED}',
-    '${AUTH_HEADER_ESCAPED}'
-  )
-) AS cron_job_id;
-SQL
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Error configuring lesson reminders pg_cron job${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ Lesson reminders cron job scheduled (UTC 09:00 daily)${NC}"
 
 # Configure auth session timeouts via Management API (optional; requires SUPABASE_ACCESS_TOKEN)
 # Time-box: max session lifetime in minutes (0 = never). Inactivity: sign out after N minutes idle (0 = never).

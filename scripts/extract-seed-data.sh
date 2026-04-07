@@ -19,7 +19,6 @@
 #   Run SyncManager (or sync-lesson-content Edge Function) after onboarding.
 #
 # Excluded (user-specific data, not seed):
-# - email_preferences (has column defaults, function handles missing rows with COALESCE)
 # - email_notifications (user-specific notifications)
 # - learning_track_assignments, learning_track_department_assignments, learning_track_role_assignments (user-specific)
 # - user_learning_track_progress, user_lesson_progress (user-specific)
@@ -106,9 +105,13 @@ TOC_DATA_FILE=$(mktemp)
 #   1. languages (referenced by email template translations if any)
 #   2. email_layouts, email_templates (independent)
 #   3. template_variables, template_variable_translations (independent)
-#   4. products (independent) - for license management
-#   5. breach_management_team (independent) - for govern
-SEED_TABLES="languages email_layouts email_templates template_variables template_variable_translations products breach_management_team"
+#   4. notification_rules (depends on email_templates)
+#   5. products (independent) - for license management
+#   6. breach_management_team (independent) - for govern
+#
+# email_preferences is included but user-specific rows are stripped before dumping
+# (see cleanup step below), leaving only the org-level row (user_id IS NULL).
+SEED_TABLES="languages email_layouts email_templates template_variables template_variable_translations notification_rules email_preferences products breach_management_team"
 
 # Verify these tables exist in the dump
 echo -e "${GREEN}Verifying seed tables exist in dump...${NC}"
@@ -411,6 +414,14 @@ for table in $SEED_TABLES; do
     fi
 done
 echo -e "${GREEN}✓ Nullified audit columns in seed tables${NC}"
+
+# Strip user-specific email_preferences rows — only the org-level row (user_id IS NULL)
+# belongs in the seed. User rows from the demo DB must not carry over to new clients.
+EP_EXISTS=$(psql "${TEMP_CONNECTION}" -tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'email_preferences');" 2>/dev/null || echo "f")
+if [ "$EP_EXISTS" = "t" ]; then
+    DELETED=$(psql "${TEMP_CONNECTION}" -tAc "DELETE FROM public.email_preferences WHERE user_id IS NOT NULL; SELECT COUNT(*) FROM public.email_preferences;" 2>/dev/null | tr -d ' ' || echo "?")
+    echo -e "${GREEN}Stripped user-specific email_preferences rows — ${DELETED} org-level row(s) remain${NC}"
+fi
 
 # Nullify member column in breach_management_team (references profiles.id which isn't in seed data)
 BREACH_TEAM_EXISTS=$(psql "${TEMP_CONNECTION}" -tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'breach_management_team');" 2>/dev/null || echo "f")
