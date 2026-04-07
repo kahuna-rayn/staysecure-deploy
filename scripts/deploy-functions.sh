@@ -27,6 +27,7 @@ if [ $# -eq 0 ]; then
     echo "Usage: ./deploy-functions.sh [function-name] <project-ref> [project-ref2] ..."
     echo "  Deploy all functions:  ./deploy-functions.sh REF1 REF2"
     echo "  Deploy one function:   ./deploy-functions.sh change-password REF1 REF2"
+    echo "  List function names:   ./deploy-functions.sh --list"
     exit 1
 fi
 
@@ -45,7 +46,14 @@ cd "${FUNC_BASE}"
 # If first arg contains a hyphen it's a function name; otherwise it's a project ref (deploy all).
 # Supabase project refs are 20-char alphanumeric strings with no hyphens.
 # Function names always contain hyphens (e.g. change-password, get-document-url).
-ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url")
+ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translate-track" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url" "sync-lesson-content" "generate-lesson" "get-user-last-logins" "org-api" "org-webhook-publisher" "request-activation-link" "reset-user-mfa")
+
+# --list: print the canonical function list (one per line) and exit.
+# Used by onboard-client.sh to avoid hardcoding the list in two places.
+if [ "$1" = "--list" ]; then
+    for f in "${ALL_FUNCTIONS[@]}"; do echo "$f"; done
+    exit 0
+fi
 
 if [[ "$1" == *"-"* ]]; then
     # Treat as a function name — validate it exists before proceeding

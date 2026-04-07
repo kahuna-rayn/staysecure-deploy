@@ -3,12 +3,20 @@
 # Extract Seed Data from Demo Dump
 # Extracts seed/reference data tables from demo.dump into seed.dump
 #
-# Seed data includes (reference/template data only):
+# Seed data includes (reference/template data ONLY):
 # - languages (reference data)
 # - email_templates, email_layouts (template data)
-# - learning_tracks, learning_track_lessons (reference content)
-# - lesson_nodes, lesson_answers, lesson_translations, lesson_answer_translations, lesson_node_translations (reference content)
 # - template_variables, template_variable_translations, template_performance (reference data)
+# - products (for license management)
+# - breach_management_team (for govern)
+#
+# DELIBERATELY EXCLUDED — lesson/track content:
+# - lessons, lesson_nodes, lesson_answers (and all their translations)
+# - learning_tracks, learning_track_lessons
+#   Lesson content must ALWAYS come from the master DB via sync-lesson-content.
+#   Seeding lesson content from the dev DB introduces stale or test data into
+#   client instances and causes count mismatches (dev ≠ master lesson counts).
+#   Run SyncManager (or sync-lesson-content Edge Function) after onboarding.
 #
 # Excluded (user-specific data, not seed):
 # - email_preferences (has column defaults, function handles missing rows with COALESCE)
@@ -70,33 +78,37 @@ fi
 PROJECT_REF=${3:-${DEV_PROJECT_REF:-"cleqfnrbiqpxpzxkatda"}}
 echo -e "${GREEN}Using PROJECT_REF: ${PROJECT_REF}${NC}"
 EXTRACT_TO_SQL=false
-# Use direct connection (port 5432) for database operations, not pooler (6543)
-CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=5432 user=postgres dbname=postgres sslmode=require"
+
+# Detect connection method: direct IPv6 or pooler fallback (same logic as create-backup.sh)
+DB_HOSTNAME="db.${PROJECT_REF}.supabase.co"
+POOLER_HOST="${POOLER_HOST:-aws-1-${REGION:-ap-southeast-1}.pooler.supabase.com}"
+RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v "^\." | head -1)
+if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+    export PGHOSTADDR="${RESOLVED_ADDR}"
+    PG_HOST="${DB_HOSTNAME}"; PG_PORT=5432; PG_USER="postgres"
+    echo -e "${GREEN}Using direct connection (IPv6): ${RESOLVED_ADDR}${NC}"
+else
+    PG_HOST="${POOLER_HOST}"; PG_PORT=5432; PG_USER="postgres.${PROJECT_REF}"
+    echo -e "${YELLOW}Direct connection unavailable — using pooler: ${POOLER_HOST}${NC}"
+fi
+CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
 
 # Create TOC file with only seed data tables
 TOC_FILE=$(mktemp)
 TOC_DATA_FILE=$(mktemp)
 
 # Hard-coded list of seed tables (reference/template data only)
-# These are the exact tables we need for new client onboarding
+# These are the exact tables we need for new client onboarding.
 # IMPORTANT: Order matters for foreign key dependencies!
-# Excluded: email_preferences (has defaults, function handles missing rows)
-# Excluded: user-specific tables (assignments, progress, notifications, reminders)
+#
+# Lesson/track tables are intentionally excluded — content comes from sync, not dev seed.
 # Dependency order:
-#   1. languages (referenced by translation tables)
-#   2. lessons (parent table)
-#   3. lesson_nodes (depends on lessons)
-#   4. lesson_answers (depends on lesson_nodes)
-#   5. learning_tracks (independent)
-#   6. learning_track_lessons (depends on both lessons and learning_tracks)
-#   7. lesson_translations (depends on lessons and languages)
-#   8. lesson_node_translations (depends on lesson_nodes and languages)
-#   9. lesson_answer_translations (depends on lesson_answers and languages)
-#   10. email_layouts, email_templates (independent)
-#   11. template_variables, template_variable_translations (independent)
-#   12. products (independent) - for license management
-#   13. breach_management_team (independent) - for govern
-SEED_TABLES="languages lessons lesson_nodes lesson_answers learning_tracks learning_track_lessons lesson_translations lesson_node_translations lesson_answer_translations email_layouts email_templates template_variables template_variable_translations products breach_management_team"
+#   1. languages (referenced by email template translations if any)
+#   2. email_layouts, email_templates (independent)
+#   3. template_variables, template_variable_translations (independent)
+#   4. products (independent) - for license management
+#   5. breach_management_team (independent) - for govern
+SEED_TABLES="languages email_layouts email_templates template_variables template_variable_translations products breach_management_team"
 
 # Verify these tables exist in the dump
 echo -e "${GREEN}Verifying seed tables exist in dump...${NC}"
@@ -155,7 +167,7 @@ psql "${CONNECTION_STRING}" \
         echo -e "${YELLOW}Database may already exist, continuing...${NC}"
     }
 
-TEMP_CONNECTION="host=db.${PROJECT_REF}.supabase.co port=5432 user=postgres dbname=${TEMP_DB} sslmode=require"
+TEMP_CONNECTION="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=${TEMP_DB} sslmode=require"
 
 # Restore schema first from schema.dump, then data from demo.dump
 # This ensures tables exist before data is loaded
@@ -311,9 +323,9 @@ for table in $SEED_TABLES; do
         # This ensures functions can be found during COPY/triggers
         # For tables that use generate_content_hash in triggers, we've disabled those triggers
         RESTORE_OUTPUT=$(pg_restore \
-            --host=db.${PROJECT_REF}.supabase.co \
-            --port=5432 \
-            --user=postgres \
+            --host=${PG_HOST} \
+            --port=${PG_PORT} \
+            --user=${PG_USER} \
             --dbname=${TEMP_DB} \
             --data-only \
             --no-owner \
@@ -434,9 +446,9 @@ if [ -n "$FAILED_TABLES" ]; then
                 # Use PGOPTIONS to ensure search_path is set for generated columns
                 # This is critical for tables with generated columns that use functions
                 RESTORE_OUTPUT=$(PGOPTIONS="-c search_path=public,pg_catalog" pg_restore \
-                    --host=db.${PROJECT_REF}.supabase.co \
-                    --port=5432 \
-                    --user=postgres \
+                    --host=${PG_HOST} \
+                    --port=${PG_PORT} \
+                    --user=${PG_USER} \
                     --dbname=${TEMP_DB} \
                     --data-only \
                     --no-owner \
@@ -506,9 +518,9 @@ for table in $SEED_TABLES; do
 done
 
 pg_dump \
-    --host=db.${PROJECT_REF}.supabase.co \
-    --port=5432 \
-    --user=postgres \
+    --host=${PG_HOST} \
+    --port=${PG_PORT} \
+    --user=${PG_USER} \
     --dbname=${TEMP_DB} \
     --data-only \
     --format=custom \

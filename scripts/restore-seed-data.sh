@@ -3,12 +3,18 @@
 # Restore Seed Data Script
 # Restores seed/reference data from seed.dump or seed.sql to a target database
 #
-# Seed data includes (reference/template data only):
+# Seed data includes (reference/template data ONLY):
 # - languages (reference data)
 # - email_templates, email_layouts (template data)
-# - learning_tracks, learning_track_lessons (reference content)
-# - lesson_nodes, lesson_answers, lesson_translations, lesson_answer_translations, lesson_node_translations (reference content)
 # - template_variables, template_variable_translations (reference data)
+# - products (license management)
+# - breach_management_team (govern)
+#
+# DELIBERATELY EXCLUDED — lesson/track content:
+# - lessons, lesson_nodes, lesson_answers (and all their translations)
+# - learning_tracks, learning_track_lessons
+#   Lesson content must come from master via sync-lesson-content, not the dev seed.
+#   After onboarding, run SyncManager to push master lesson content to this client.
 #
 # Excluded (user-specific data, not seed):
 # - email_preferences (has column defaults, function handles missing rows with COALESCE)
@@ -74,10 +80,20 @@ else
     echo "Using database password from PGPASSWORD environment variable"
 fi
 
-# Use pooler connection (port 6543) for database operations, matching onboard script
-# Note: For pg_restore, we may need direct connection (5432) if PGOPTIONS is needed
-CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
-DIRECT_CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=5432 user=postgres dbname=postgres sslmode=require"
+# Detect connection method: direct IPv6 or session-mode pooler fallback
+DB_HOSTNAME="db.${PROJECT_REF}.supabase.co"
+POOLER_HOST="${POOLER_HOST:-aws-1-${REGION:-ap-southeast-1}.pooler.supabase.com}"
+RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v "^\." | head -1)
+if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+    export PGHOSTADDR="${RESOLVED_ADDR}"
+    PG_HOST="${DB_HOSTNAME}"; PG_PORT=6543; PG_USER="postgres"
+    echo -e "${GREEN}Using direct connection (IPv6): ${RESOLVED_ADDR}${NC}"
+else
+    PG_HOST="${POOLER_HOST}"; PG_PORT=5432; PG_USER="postgres.${PROJECT_REF}"
+    echo -e "${YELLOW}Direct connection unavailable — using pooler: ${POOLER_HOST}${NC}"
+fi
+CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
+DIRECT_CONNECTION_STRING="${CONNECTION_STRING}"
 
 # Verify seed file contains data
 if [ "$FORMAT" = "custom" ]; then
@@ -125,7 +141,7 @@ if [ "$FORMAT" = "custom" ]; then
     echo -e "${GREEN}Checking source row counts (from dev database)...${NC}"
     DEV_PROJECT_REF="cleqfnrbiqpxpzxkatda"
     if [ -n "$PGPASSWORD" ]; then
-        DEV_CONNECTION="host=db.${DEV_PROJECT_REF}.supabase.co port=5432 user=postgres dbname=postgres sslmode=require"
+        DEV_CONNECTION="host=${POOLER_HOST} port=5432 user=postgres.${DEV_PROJECT_REF} dbname=postgres sslmode=require"
         for table in $RESTORE_ORDER; do
             SOURCE_COUNT=$(psql "$DEV_CONNECTION" -tAc "SELECT COUNT(*) FROM public.${table};" 2>/dev/null | tr -d ' ' || echo "?")
             if [ "$SOURCE_COUNT" != "?" ]; then
@@ -197,7 +213,7 @@ EOF
     # Filter out expected errors from output (but still log them to file)
     # RI_ConstraintTrigger errors are system triggers managed by PostgreSQL - we can't restore them and don't need to
     PGOPTIONS="-c search_path=public,pg_catalog" pg_restore \
-        --host=db.${PROJECT_REF}.supabase.co \
+        --host=${PG_HOST} \
         --port=5432 \
         --user=postgres \
         --dbname=postgres \
@@ -250,7 +266,7 @@ EOF
                     if [ -s "${TABLE_TOC}" ]; then
                         # Restore with explicit search_path via PGOPTIONS
                         RESTORE_OUTPUT=$(PGOPTIONS="-c search_path=public,pg_catalog" pg_restore \
-                            --host=db.${PROJECT_REF}.supabase.co \
+                            --host=${PG_HOST} \
                             --port=5432 \
                             --user=postgres \
                             --dbname=postgres \
@@ -316,7 +332,7 @@ EMAIL_LAYOUTS_COUNT=$(PGPASSWORD="${PGPASSWORD}" psql "${DIRECT_CONNECTION_STRIN
 
 # Get source counts for comparison if available
 DEV_PROJECT_REF="cleqfnrbiqpxpzxkatda"
-DEV_CONNECTION="host=db.${DEV_PROJECT_REF}.supabase.co port=5432 user=postgres dbname=postgres sslmode=require"
+DEV_CONNECTION="host=${POOLER_HOST} port=5432 user=postgres.${DEV_PROJECT_REF} dbname=postgres sslmode=require"
 SOURCE_LANGUAGE_COUNT="?"
 SOURCE_LESSONS_COUNT="?"
 SOURCE_LEARNING_TRACKS_COUNT="?"

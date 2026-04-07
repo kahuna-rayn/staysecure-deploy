@@ -27,6 +27,10 @@ export SUPABASE_ORG_ID="<your-supabase-org-id>"
 # AWS Region for Supabase projects
 export REGION="ap-southeast-1"  # or your preferred region (us-east-1, eu-west-1, etc.)
 
+# Supabase Project URL
+# Get from: Supabase Dashboard → Settings → API → Project URL
+export SUPABASE_URL="https://<project-ref>.supabase.co"
+
 # Supabase Service Role Key
 # Get from: Supabase Dashboard → Settings → API → service_role key
 # WARNING: This is a sensitive key - keep it secure!
@@ -67,4 +71,20 @@ export AUTH_LAMBDA_URL="<your-lambda-function-url>"
 # - Production: oownotmpcqcgojhrzqaj
 # - Dev: cleqfnrbiqpxpzxkatda
 export MASTER_PROJECT_REF="<master-project-ref>"
+
+# Certificate Renderer (for PDF certificate generation)
+# Get from: Vercel deployment URL of the certificate-renderer project
+export CERT_RENDERER_URL="<your-cert-renderer-vercel-url>"
+# Shared secret between this script and the renderer (set the same value in the renderer's env)
+export CERT_RENDER_SECRET="<your-cert-render-secret>"
+
+# Anthropic API Key (for AI features)
+# Get from: https://console.anthropic.com/
+export ANTHROPIC_API_KEY="<your-anthropic-api-key>"
+
+# Learn App Base URL + client path (used by migration script)
+# APP_BASE_URL: the Learn app domain for this client instance
+export APP_BASE_URL="https://staysecure-learn.raynsecure.com"
+# CLIENT_PATH: the tenant path segment e.g. /nexus (leave empty for dev/staging)
+export CLIENT_PATH="/nexus"
 

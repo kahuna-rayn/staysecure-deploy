@@ -448,7 +448,7 @@ for app in "${CONSUMING_APPS[@]}"; do
         
         # Install dependencies (will regenerate package-lock.json with latest module version)
         info "Installing dependencies (will regenerate package-lock.json with latest $MODULE_PKG)..."
-        if ! npm install "$MODULE_PKG@github:kahuna-rayn/$MODULE_PKG#main" --legacy-peer-deps --save; then
+        if ! npm install "$MODULE_PKG@github:kahuna-rayn/$MODULE_PKG#main" --legacy-peer-deps --save --ignore-scripts; then
             error "Failed to install $MODULE_PKG in $app"
             continue
         fi
@@ -502,7 +502,7 @@ for app in "${CONSUMING_APPS[@]}"; do
             info "Waiting 3 seconds for GitHub to propagate changes..."
             sleep 3
             
-            if ! npm install "github:kahuna-rayn/$MODULE_PKG#main" --force --legacy-peer-deps; then
+            if ! npm install "github:kahuna-rayn/$MODULE_PKG#main" --force --legacy-peer-deps --ignore-scripts; then
                 error "Failed to force reinstall $MODULE_PKG"
                 continue
             fi

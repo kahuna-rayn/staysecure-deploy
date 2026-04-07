@@ -1,0 +1,17 @@
+{
+  "name": "staysecure-migration-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "migrate": "ts-node migrate-psybersafe-users.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.4",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}

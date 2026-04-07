@@ -324,6 +324,21 @@ if [ -f "backups/schema.dump" ]; then
         echo -e "${RED}Error: post-migration-fixes.sql not found${NC}"
         exit 1
     fi
+
+    # Seed notification email preferences and templates (idempotent — safe to re-run)
+    if [ -f "../notifications/supabase/seed_email_templates.sql" ]; then
+        echo -e "${GREEN}Seeding email preferences and notification templates...${NC}"
+        psql "${CONNECTION_STRING}" \
+            --single-transaction \
+            --variable ON_ERROR_STOP=1 \
+            --file ../notifications/supabase/seed_email_templates.sql || {
+                echo -e "${RED}Error: Failed to seed email templates${NC}"
+                exit 1
+            }
+        echo -e "${GREEN}✓ Email preferences and notification templates seeded${NC}"
+    else
+        echo -e "${YELLOW}Warning: seed_email_templates.sql not found — email_preferences will not be seeded${NC}"
+    fi
     
     echo -e "${GREEN}✓ Backup restored successfully${NC}"
 elif [ -f "backups/schema.sql" ]; then
@@ -403,6 +418,21 @@ elif [ -f "backups/schema.sql" ]; then
     else
         echo -e "${RED}Error: post-migration-fixes.sql not found${NC}"
         exit 1
+    fi
+
+    # Seed notification email preferences and templates (idempotent — safe to re-run)
+    if [ -f "../notifications/supabase/seed_email_templates.sql" ]; then
+        echo -e "${GREEN}Seeding email preferences and notification templates...${NC}"
+        psql "${CONNECTION_STRING}" \
+            --single-transaction \
+            --variable ON_ERROR_STOP=1 \
+            --file ../notifications/supabase/seed_email_templates.sql || {
+                echo -e "${RED}Error: Failed to seed email templates${NC}"
+                exit 1
+            }
+        echo -e "${GREEN}✓ Email preferences and notification templates seeded${NC}"
+    else
+        echo -e "${YELLOW}Warning: seed_email_templates.sql not found — email_preferences will not be seeded${NC}"
     fi
     
     echo -e "${GREEN}✓ Backup restored successfully${NC}"
@@ -711,15 +741,22 @@ echo "Checking critical components..."
 TARGET_AUTH_USER_TRIGGER=$(psql "${CONNECTION_STRING}" -t -c "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'on_auth_user_created');" 2>&1 | grep -v "ERROR" | tr -d ' \n' | head -1)
 [ "$TARGET_AUTH_USER_TRIGGER" = "t" ] && TARGET_AUTH_USER_TRIGGER="Yes" || TARGET_AUTH_USER_TRIGGER="No"
 
-# Check edge functions
-EXPECTED_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "update-password" "update-user-password" "change-password" "request-activation-link" "translate-lesson" "translate-track" "translation-status" "get-document-url" "get-user-last-logins" "process-scheduled-notifications" "generate-certificate" "get-certificate-url" "generate-lesson" "sync-lesson-content" "org-api" "org-webhook-publisher")
+# Check edge functions — derive list from deploy-functions.sh (single source of truth)
+mapfile -t EXPECTED_FUNCTIONS < <("${SCRIPT_DIR}/deploy-functions.sh" --list 2>/dev/null)
 FUNCTIONS_LIST=$(supabase functions list --project-ref ${PROJECT_REF} --output json 2>/dev/null | jq -r '.[].slug' 2>/dev/null || echo "")
 TARGET_EDGE_FUNCTIONS=0
+TARGET_MISSING_FUNCTIONS=()
 for func in "${EXPECTED_FUNCTIONS[@]}"; do
     if echo "$FUNCTIONS_LIST" | grep -q "^${func}$"; then
         TARGET_EDGE_FUNCTIONS=$((TARGET_EDGE_FUNCTIONS + 1))
+    else
+        TARGET_MISSING_FUNCTIONS+=("$func")
     fi
 done
+
+# Check storage buckets
+EXPECTED_BUCKETS=("avatars" "documents" "certificates" "logos" "lesson-media")
+TARGET_STORAGE_BUCKETS=$(psql "${CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM storage.buckets WHERE id IN ('avatars','documents','certificates','logos','lesson-media');" 2>&1 | grep -v "ERROR" | tr -d ' \n')
 
 # Check edge function secrets
 EXPECTED_SECRETS=("GOOGLE_TRANSLATE_API_KEY" "DEEPL_API_KEY" "AUTH_LAMBDA_URL" "APP_BASE_URL" "MANAGER_NOTIFICATION_COOLDOWN_HOURS")
@@ -757,6 +794,9 @@ for func in "${EXPECTED_FUNCTIONS[@]}"; do
     fi
 done
 
+# Check storage buckets in source
+SOURCE_STORAGE_BUCKETS=$(psql "${SOURCE_CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM storage.buckets WHERE id IN ('avatars','documents','certificates','logos','lesson-media');" 2>&1 | grep -v "ERROR" | tr -d ' \n')
+
 # Check edge function secrets in source (dev) project
 SOURCE_SECRETS_LIST=$(supabase secrets list --project-ref ${SOURCE_PROJECT_REF} --output json 2>/dev/null | jq -r '.[].name' 2>/dev/null || echo "")
 SOURCE_EDGE_SECRETS=0
@@ -791,6 +831,8 @@ done
 [ -z "$SOURCE_EDGE_FUNCTIONS" ] && SOURCE_EDGE_FUNCTIONS="?"
 [ -z "$TARGET_EDGE_SECRETS" ] && TARGET_EDGE_SECRETS="?"
 [ -z "$SOURCE_EDGE_SECRETS" ] && SOURCE_EDGE_SECRETS="?"
+[ -z "$TARGET_STORAGE_BUCKETS" ] && TARGET_STORAGE_BUCKETS="?"
+[ -z "$SOURCE_STORAGE_BUCKETS" ] && SOURCE_STORAGE_BUCKETS="?"
 
 # Display comparison table
 echo ""
@@ -872,8 +914,25 @@ if [ "$TARGET_EDGE_SECRETS" = "$SOURCE_EDGE_SECRETS" ] && [ "$TARGET_EDGE_SECRET
 else
     echo -e " ${RED}✗${NC}     │"
 fi
+# Storage buckets
+printf "│ %-23s │ %12s │ %12s │" "Storage Buckets" "$SOURCE_STORAGE_BUCKETS" "$TARGET_STORAGE_BUCKETS"
+EXPECTED_BUCKET_COUNT="${#EXPECTED_BUCKETS[@]}"
+if [ "$TARGET_STORAGE_BUCKETS" = "$EXPECTED_BUCKET_COUNT" ]; then
+    echo -e " ${GREEN}✓${NC}     │"
+else
+    echo -e " ${RED}✗${NC}     │"
+fi
 echo "└─────────────────────────┴──────────────┴──────────────┴─────────┘"
 echo ""
+
+# Show named missing edge functions
+if [ ${#TARGET_MISSING_FUNCTIONS[@]} -gt 0 ]; then
+    echo -e "${RED}⚠️  Missing Edge Functions (${#TARGET_MISSING_FUNCTIONS[@]}):${NC}"
+    for f in "${TARGET_MISSING_FUNCTIONS[@]}"; do
+        echo -e "   ${RED}✗${NC} $f"
+    done
+    echo ""
+fi
 
 # Show warning if critical trigger is missing
 if [ "$TARGET_AUTH_USER_TRIGGER" != "Yes" ]; then

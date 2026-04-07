@@ -38,12 +38,37 @@ else
     echo "Using database password from PGPASSWORD environment variable"
 fi
 
-# Create connection string using direct database connection (not pooler)
-# PGPASSWORD environment variable will be used for authentication
-CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+# Build connection URL. Try direct hostname first; fall back to session-mode pooler.
+# Direct:  db.<ref>.supabase.co port 6543  (works when IPv6 routing is available)
+# Pooler:  aws-1-ap-southeast-1.pooler.supabase.com port 5432 (works over IPv4, username needs .<ref> suffix)
+DB_HOSTNAME="db.${PROJECT_REF}.supabase.co"
+POOLER_HOST="${POOLER_HOST:-aws-1-${REGION:-ap-southeast-1}.pooler.supabase.com}"
+
+# Detect whether direct connection is reachable (IPv6 routing test)
+RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v "^\." | head -1)
+if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+    # Direct IPv6 available — use it (PGHOSTADDR bypasses getaddrinfo, --host provides TLS SNI)
+    export PGHOSTADDR="${RESOLVED_ADDR}"
+    PG_HOST="${DB_HOSTNAME}"
+    PG_PORT=6543
+    PG_USER="postgres"
+    echo -e "${GREEN}Using direct connection (IPv6): ${RESOLVED_ADDR}${NC}"
+else
+    # Fall back to session-mode pooler over IPv4
+    PG_HOST="${POOLER_HOST}"
+    PG_PORT=5432
+    PG_USER="postgres.${PROJECT_REF}"
+    echo -e "${YELLOW}Direct connection unavailable — using pooler: ${POOLER_HOST}${NC}"
+fi
+
+CONNECTION_STRING="postgresql://${PG_USER}@${PG_HOST}:${PG_PORT}/postgres?sslmode=require"
+
+pg_dump_cmd() {
+    pg_dump "${CONNECTION_STRING}" "$@"
+}
 
 echo -e "${GREEN}Creating schema backup (custom format, public schema)...${NC}"
-pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+pg_dump_cmd \
     --schema-only \
     --schema=public \
     --format=custom \
@@ -53,7 +78,7 @@ pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
 
 # Create storage schema backup if it exists
 echo -e "${GREEN}Creating storage schema backup (if available)...${NC}"
-pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+pg_dump_cmd \
     --schema-only \
     --schema=storage \
     --format=custom \
@@ -62,7 +87,7 @@ pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
     --verbose 2>&1 || echo -e "${YELLOW}Note: Storage schema not found or empty (this is OK)${NC}"
 
 echo -e "${GREEN}Creating demo data backup (custom format)...${NC}"
-pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+pg_dump_cmd \
     --data-only \
     --schema=public \
     --format=custom \
@@ -72,7 +97,7 @@ pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
 
 # Create auth.users dump for demo data (needed for foreign key constraints)
 echo -e "${GREEN}Creating auth.users backup for demo data (custom format)...${NC}"
-pg_dump --host=db.${PROJECT_REF}.supabase.co --port=6543 --user=postgres \
+pg_dump_cmd \
     --data-only \
     --table=auth.users \
     --format=custom \

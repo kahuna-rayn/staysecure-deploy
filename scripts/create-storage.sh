@@ -29,15 +29,25 @@ fi
 SQL="
 INSERT INTO storage.buckets (id, name, public, file_size_limit)
 VALUES
-    ('avatars',      'avatars',      true,  2097152),
-    ('documents',    'documents',    false, 10485760),
+    ('avatars',      'avatars',      true,  52428800),
+    ('documents',    'documents',    false, 52428800),
     ('certificates', 'certificates', false, 10485760),
     ('logos',        'logos',        true,  2097152)
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET file_size_limit = EXCLUDED.file_size_limit;
 "
 
 for PROJECT_REF in "$@"; do
-    CONNECTION_STRING="host=db.${PROJECT_REF}.supabase.co port=6543 user=postgres dbname=postgres sslmode=require"
+    # Detect connection method: direct IPv6 or session-mode pooler fallback
+    DB_HOSTNAME="db.${PROJECT_REF}.supabase.co"
+    POOLER_HOST="${POOLER_HOST:-aws-1-${REGION:-ap-southeast-1}.pooler.supabase.com}"
+    RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v "^\." | head -1)
+    if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+        export PGHOSTADDR="${RESOLVED_ADDR}"
+        CONNECTION_STRING="host=${DB_HOSTNAME} port=6543 user=postgres dbname=postgres sslmode=require"
+    else
+        unset PGHOSTADDR
+        CONNECTION_STRING="host=${POOLER_HOST} port=5432 user=postgres.${PROJECT_REF} dbname=postgres sslmode=require"
+    fi
 
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
@@ -45,8 +55,8 @@ for PROJECT_REF in "$@"; do
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 
     if psql "${CONNECTION_STRING}" --command "${SQL}"; then
-        echo -e "  ${GREEN}✓${NC} avatars (public, 2MB)"
-        echo -e "  ${GREEN}✓${NC} documents (private, 10MB)"
+        echo -e "  ${GREEN}✓${NC} avatars (public, 50MB — covers lesson-media/ folder incl. videos)"
+        echo -e "  ${GREEN}✓${NC} documents (private, 50MB)"
         echo -e "  ${GREEN}✓${NC} certificates (private, 10MB)"
         echo -e "  ${GREEN}✓${NC} logos (public, 2MB)"
         echo -e "${GREEN}✓ Completed ${PROJECT_REF}${NC}"
