@@ -48,7 +48,7 @@ cd "${FUNC_BASE}"
 # If first arg contains a hyphen it's a function name; otherwise it's a project ref (deploy all).
 # Supabase project refs are 20-char alphanumeric strings with no hyphens.
 # Function names always contain hyphens (e.g. change-password, get-document-url).
-ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translate-track" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url" "sync-lesson-content" "generate-lesson" "get-user-last-logins" "org-api" "org-webhook-publisher" "request-activation-link" "reset-user-mfa")
+ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translate-track" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url" "sync-lesson-content" "generate-lesson" "import-from-document" "get-user-last-logins" "org-api" "org-webhook-publisher" "request-activation-link" "reset-user-mfa")
 
 # --list: print the canonical function list (one per line) and exit.
 # Used by onboard-client.sh to avoid hardcoding the list in two places.

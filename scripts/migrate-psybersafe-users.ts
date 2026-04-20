@@ -109,7 +109,7 @@ import * as XLSX from 'xlsx';
 const TRACK_IDS = {
   cybersecurityFoundation:   '3a0a6b51-0108-4b22-83c5-eb258486d7c8',
   cybersecurityFoundationII: '84caaddd-1869-405f-b408-4e770b1bc870',
-  cybersecurityIntermediate: '60e56c43-a792-429d-bc8b-6f2f410da5a6',
+  cybersecurityIntermediate: '4a7e7014-9b1f-4f90-be2e-d1a8a06afd04',
 } as const;
 
 /**
