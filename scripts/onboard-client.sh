@@ -577,26 +577,32 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Configure auth session timeouts via Management API (optional; requires SUPABASE_ACCESS_TOKEN)
-# Time-box: max session lifetime in minutes (0 = never). Inactivity: sign out after N minutes idle (0 = never).
-SESSIONS_TIMEBOX_MINUTES=${SESSIONS_TIMEBOX_MINUTES:-1440}
-SESSIONS_INACTIVITY_TIMEOUT_MINUTES=${SESSIONS_INACTIVITY_TIMEOUT_MINUTES:-0}
+# Configure auth session timeouts and JWT expiry via Management API (optional; requires SUPABASE_ACCESS_TOKEN)
+# Session timeout values are Go duration strings (e.g. "30m", "1h", "0" = disabled).
+# Time-box: hard cap on session lifetime regardless of activity (0 = disabled).
+# Inactivity: sign out after this period of no token-refresh activity.
+# JWT expiry must be shorter than the inactivity timeout so the client auto-refreshes
+# before the server-side inactivity window closes. Rule of thumb: jwt_exp <= inactivity / 2.
+# jwt_exp is in seconds (integer): 600 = 10 minutes.
+SESSIONS_TIMEBOX=${SESSIONS_TIMEBOX:-0}
+SESSIONS_INACTIVITY_TIMEOUT=${SESSIONS_INACTIVITY_TIMEOUT:-30m}
+JWT_EXP_SECONDS=${JWT_EXP_SECONDS:-600}
 if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
-    echo -e "${GREEN}Configuring auth session timeouts (Management API)...${NC}"
+    echo -e "${GREEN}Configuring auth session timeouts and JWT expiry (Management API)...${NC}"
     AUTH_CONFIG_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
         -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "{\"sessions_timebox\": ${SESSIONS_TIMEBOX_MINUTES}, \"sessions_inactivity_timeout\": ${SESSIONS_INACTIVITY_TIMEOUT_MINUTES}}")
+        -d "{\"sessions_timebox\": \"${SESSIONS_TIMEBOX}\", \"sessions_inactivity_timeout\": \"${SESSIONS_INACTIVITY_TIMEOUT}\", \"jwt_exp\": ${JWT_EXP_SECONDS}}")
     AUTH_CONFIG_HTTP_CODE=$(echo "$AUTH_CONFIG_RESPONSE" | tail -n1)
     if [ "$AUTH_CONFIG_HTTP_CODE" = "200" ]; then
-        echo -e "${GREEN}✓ Auth session timeouts set (time-box: ${SESSIONS_TIMEBOX_MINUTES} min, inactivity: ${SESSIONS_INACTIVITY_TIMEOUT_MINUTES} min)${NC}"
+        echo -e "${GREEN}✓ Auth config set (time-box: ${SESSIONS_TIMEBOX}, inactivity: ${SESSIONS_INACTIVITY_TIMEOUT}, JWT expiry: ${JWT_EXP_SECONDS}s)${NC}"
     else
-        echo -e "${YELLOW}Warning: Could not set auth session timeouts (HTTP ${AUTH_CONFIG_HTTP_CODE})${NC}"
-        echo -e "${YELLOW}  Set them manually: Dashboard → Authentication → User Sessions${NC}"
+        echo -e "${YELLOW}Warning: Could not set auth config (HTTP ${AUTH_CONFIG_HTTP_CODE})${NC}"
+        echo -e "${YELLOW}  Set them manually — see manual steps below${NC}"
     fi
 else
-    echo -e "${YELLOW}Note: Set SUPABASE_ACCESS_TOKEN (Personal Access Token) to configure auth session timeouts automatically.${NC}"
-    echo -e "${YELLOW}  Or set in Dashboard → Authentication → User Sessions (time-box: ${SESSIONS_TIMEBOX_MINUTES} min, inactivity: ${SESSIONS_INACTIVITY_TIMEOUT_MINUTES} min)${NC}"
+    echo -e "${YELLOW}Note: Set SUPABASE_ACCESS_TOKEN (Personal Access Token) to configure auth settings automatically.${NC}"
+    echo -e "${YELLOW}  Or set manually — see manual steps below${NC}"
 fi
 
 # Set client service key in master database for sync-lesson-content Edge Function
@@ -892,10 +898,12 @@ echo -e "${YELLOW}Redirect URLs (add each on a new line):${NC}"
 if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "staging" ]; then
     echo -e "  https://${CLIENT_DOMAIN}/reset-password"
     echo -e "  https://${CLIENT_DOMAIN}/activate-account"
+    echo -e "  https://${CLIENT_DOMAIN}/auth/callback"
     echo -e "${YELLOW}Note: For single-client environments, URLs don't need /${CLIENT_NAME} prefix${NC}"
 else
     echo -e "  https://${BASE_DOMAIN}/${CLIENT_NAME}/reset-password"
     echo -e "  https://${BASE_DOMAIN}/${CLIENT_NAME}/activate-account"
+    echo -e "  https://${BASE_DOMAIN}/${CLIENT_NAME}/auth/callback"
     echo -e "${YELLOW}Note: For production, URLs require /${CLIENT_NAME} prefix${NC}"
 fi
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
@@ -1037,15 +1045,22 @@ fi
 
 echo "Next steps:"
 echo "  1. Configure Auth Settings in Supabase Dashboard:"
-echo "     • Go to: https://supabase.com/dashboard/project/${PROJECT_REF}/auth/url-configuration"
+echo "     • If SUPABASE_ACCESS_TOKEN was not set, configure these manually:"
+echo "       - Session timeouts: https://supabase.com/dashboard/project/${PROJECT_REF}/auth/sessions"
+echo "           Time-box: 0 (disabled), Inactivity timeout: 30m"
+echo "       - JWT expiry: https://supabase.com/dashboard/project/${PROJECT_REF}/settings/jwt/legacy"
+echo "           JWT expiry: 600 seconds (10 minutes) — must be shorter than inactivity timeout"
+echo "     • URL configuration: https://supabase.com/dashboard/project/${PROJECT_REF}/auth/url-configuration"
 echo "     • Set Site URL to: https://${CLIENT_DOMAIN}"
 echo "     • Add Redirect URLs (one per line):"
 if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "staging" ]; then
     echo "       - https://${CLIENT_DOMAIN}/reset-password"
     echo "       - https://${CLIENT_DOMAIN}/activate-account"
+    echo "       - https://${CLIENT_DOMAIN}/auth/callback"
 else
     echo "       - https://${BASE_DOMAIN}/${CLIENT_NAME}/reset-password"
     echo "       - https://${BASE_DOMAIN}/${CLIENT_NAME}/activate-account"
+    echo "       - https://${BASE_DOMAIN}/${CLIENT_NAME}/auth/callback"
 fi
 echo "  2. Copy the client configuration JSON above"
 echo "  3. Update Vercel environment variable VITE_CLIENT_CONFIGS"
