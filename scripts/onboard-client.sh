@@ -581,12 +581,15 @@ fi
 # Session timeout values are Go duration strings (e.g. "30m", "1h", "0" = disabled).
 # Time-box: hard cap on session lifetime regardless of activity (0 = disabled).
 # Inactivity: sign out after this period of no token-refresh activity.
-# JWT expiry must be shorter than the inactivity timeout so the client auto-refreshes
-# before the server-side inactivity window closes. Rule of thumb: jwt_exp <= inactivity / 2.
-# jwt_exp is in seconds (integer): 600 = 10 minutes.
+# JWT expiry must be short enough that the Supabase client auto-refreshes well within
+# the inactivity window. The client refreshes ~90s before expiry (ticks every 30s,
+# triggers at <3 ticks remaining). Setting jwt_exp equal to the inactivity timeout
+# means a refresh fires ~90s before the window closes — enough buffer in practice.
+# Do not go below 300s (5 min): clock skew and refresh overhead cause spurious logouts.
+# jwt_exp is in seconds (integer): 1800 = 30 minutes.
 SESSIONS_TIMEBOX=${SESSIONS_TIMEBOX:-0}
 SESSIONS_INACTIVITY_TIMEOUT=${SESSIONS_INACTIVITY_TIMEOUT:-30m}
-JWT_EXP_SECONDS=${JWT_EXP_SECONDS:-600}
+JWT_EXP_SECONDS=${JWT_EXP_SECONDS:-1800}
 if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
     echo -e "${GREEN}Configuring auth session timeouts and JWT expiry (Management API)...${NC}"
     AUTH_CONFIG_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
@@ -1049,7 +1052,7 @@ echo "     • If SUPABASE_ACCESS_TOKEN was not set, configure these manually:"
 echo "       - Session timeouts: https://supabase.com/dashboard/project/${PROJECT_REF}/auth/sessions"
 echo "           Time-box: 0 (disabled), Inactivity timeout: 30m"
 echo "       - JWT expiry: https://supabase.com/dashboard/project/${PROJECT_REF}/settings/jwt/legacy"
-echo "           JWT expiry: 600 seconds (10 minutes) — must be shorter than inactivity timeout"
+echo "           JWT expiry: 1800 seconds (30 minutes) — equal to inactivity timeout; client auto-refreshes ~90s before expiry"
 echo "     • URL configuration: https://supabase.com/dashboard/project/${PROJECT_REF}/auth/url-configuration"
 echo "     • Set Site URL to: https://${CLIENT_DOMAIN}"
 echo "     • Add Redirect URLs (one per line):"
