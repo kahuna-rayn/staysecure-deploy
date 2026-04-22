@@ -586,10 +586,12 @@ fi
 # triggers at <3 ticks remaining). Setting jwt_exp equal to the inactivity timeout
 # means a refresh fires ~90s before the window closes — enough buffer in practice.
 # Do not go below 300s (5 min): clock skew and refresh overhead cause spurious logouts.
-# jwt_exp is in seconds (integer): 1800 = 30 minutes.
+# jwt_exp is in seconds (integer): 900 = 15 minutes.
+# Keeping jwt_exp at half the inactivity timeout ensures the client refreshes
+# well before the 30-minute inactivity window closes, avoiding race conditions.
 SESSIONS_TIMEBOX=${SESSIONS_TIMEBOX:-0}
 SESSIONS_INACTIVITY_TIMEOUT=${SESSIONS_INACTIVITY_TIMEOUT:-30m}
-JWT_EXP_SECONDS=${JWT_EXP_SECONDS:-1800}
+JWT_EXP_SECONDS=${JWT_EXP_SECONDS:-900}
 if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
     echo -e "${GREEN}Configuring auth session timeouts and JWT expiry (Management API)...${NC}"
     AUTH_CONFIG_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
