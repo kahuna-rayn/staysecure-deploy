@@ -27,12 +27,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MASTER_PROJECT_REF="oownotmpcqcgojhrzqaj"
 
+# ── Resolve project name → ref ────────────────────────────────────────────────
+# Accepts either a 20-char project ref (used as-is) or a project name (looked up).
+# Prints the resolved ref, or an empty string if not found.
+resolve_ref() {
+    local input="$1"
+    # A Supabase project ref is exactly 20 lowercase alphanumeric chars
+    if [[ "$input" =~ ^[a-z0-9]{20}$ ]]; then
+        echo "$input"
+        return
+    fi
+    # Treat as project name — look it up
+    local ref
+    ref=$(supabase projects list --output json 2>/dev/null \
+        | jq -r --arg name "$input" '.[] | select(.name == $name) | .id' | head -1)
+    if [ -z "$ref" ]; then
+        echo -e "${RED}Error: No project found with name \"${input}\"${NC}" >&2
+        echo -e "${YELLOW}Tip: Run 'supabase projects list' to see available names and refs.${NC}" >&2
+    fi
+    echo "$ref"
+}
+
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 if [ $# -eq 0 ]; then
-    echo -e "${RED}Error: At least one project reference is required${NC}"
+    echo -e "${RED}Error: At least one project name or ref is required${NC}"
     echo "Usage:"
-    echo "  ./setup-cron-jobs.sh <project-ref> [project-ref2] ..."
+    echo "  ./setup-cron-jobs.sh <project-name-or-ref> [...]"
     echo "  ./setup-cron-jobs.sh --all-production"
     echo "  ./setup-cron-jobs.sh --all"
     echo "  ./setup-cron-jobs.sh --master"
@@ -40,6 +61,11 @@ if [ $# -eq 0 ]; then
     echo "  --all-production  All projects whose name ends in '-prod'"
     echo "  --all             Every project in the org"
     echo "  --master          Master DB only (reconcile-license-usage + expiry digest)"
+    echo ""
+    echo "Examples:"
+    echo "  ./setup-cron-jobs.sh acme-prod"
+    echo "  ./setup-cron-jobs.sh acme-prod globex-prod"
+    echo "  ./setup-cron-jobs.sh cleqfnrbiqpxpzxkatda   # ref also accepted"
     exit 1
 fi
 
@@ -147,6 +173,17 @@ elif [ "$1" = "--all" ]; then
         | jq -r '.[] | "  \(.id)  \(.name)"'
     echo ""
     set -- "${RESOLVED[@]}"
+else
+    # Resolve any project names in the argument list to refs
+    RESOLVED=()
+    for arg in "$@"; do
+        ref=$(resolve_ref "$arg")
+        if [ -z "$ref" ]; then
+            echo -e "${RED}Aborting: could not resolve \"${arg}\"${NC}"; exit 1
+        fi
+        RESOLVED+=("$ref")
+    done
+    set -- "${RESOLVED[@]}"
 fi
 
 # ── Load env (for PGPASSWORD, POOLER_HOST, REGION) ───────────────────────────
@@ -166,9 +203,13 @@ fi
 # ── Per-project setup ─────────────────────────────────────────────────────────
 
 for PROJECT_REF in "$@"; do
+    PROJECT_NAME=$(supabase projects list --output json 2>/dev/null \
+        | jq -r --arg ref "$PROJECT_REF" '.[] | select(.id == $ref) | .name' | head -1)
+    DISPLAY="${PROJECT_NAME:-$PROJECT_REF} (${PROJECT_REF})"
+
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}Setting up cron jobs for project: ${PROJECT_REF}${NC}"
+    echo -e "${GREEN}Setting up cron jobs for: ${DISPLAY}${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 
     # Fetch service role key for this project
@@ -176,7 +217,7 @@ for PROJECT_REF in "$@"; do
         | grep 'service_role' | awk '{print $3}')
 
     if [ -z "$SERVICE_ROLE_KEY" ]; then
-        echo -e "${RED}Error: Could not retrieve service role key for ${PROJECT_REF} — skipping${NC}"
+        echo -e "${RED}Error: Could not retrieve service role key for ${DISPLAY} — skipping${NC}"
         echo "Ensure you are logged into the Supabase CLI and have access to this project."
         continue
     fi
@@ -320,7 +361,7 @@ SELECT cron.schedule(
 SQL
 
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: cron job setup failed for ${PROJECT_REF}${NC}"
+        echo -e "${RED}Error: cron job setup failed for ${DISPLAY}${NC}"
         continue
     fi
 
@@ -338,7 +379,7 @@ WHERE jobname IN (
 ORDER BY jobname;
 " 2>/dev/null || true
 
-    echo -e "${GREEN}✓ Cron jobs configured for ${PROJECT_REF}${NC}"
+    echo -e "${GREEN}✓ Cron jobs configured for ${DISPLAY}${NC}"
     echo "  process-license-expiry-notifications → 08:00 UTC daily (license_expiry)"
     echo "  process-manager-notifications        → 01:00 UTC daily (manager_employee_incomplete)"
     echo "  process-staff-pending-notifications  → 01:00 UTC daily (manager_staff_pending)"
