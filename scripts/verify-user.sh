@@ -84,7 +84,7 @@ fi
 
 echo ""
 echo "Checking profiles..."
-PROFILE_INFO=$(psql "${CONNECTION_STRING}" -t -A -c "SELECT id, username, status FROM public.profiles WHERE id IN (SELECT id FROM auth.users WHERE email = '${EMAIL}');" 2>&1)
+PROFILE_INFO=$(psql "${CONNECTION_STRING}" -t -A -c "SELECT id, email, status FROM public.profiles WHERE id IN (SELECT id FROM auth.users WHERE email = '${EMAIL}');" 2>&1)
 
 if [ -z "$PROFILE_INFO" ] || echo "$PROFILE_INFO" | grep -q "0 rows"; then
     echo -e "${RED}✗ Profile not found${NC}"

@@ -478,6 +478,22 @@ else
     fi
 fi
 
+# Repair migration history and apply any new migrations
+# The schema was restored from a dump, so Supabase has no record of which migrations
+# have been applied. Repair stamps all local migration files as applied (matching the
+# dump), then db push runs any migrations that are newer than the dump.
+echo -e "${GREEN}Repairing migration history...${NC}"
+pushd "${LEARN_DIR}" > /dev/null
+supabase migration repair --status applied --project-ref ${PROJECT_REF} 2>/dev/null && \
+    echo -e "${GREEN}✓ Migration history repaired${NC}" || \
+    echo -e "${YELLOW}Warning: Could not repair migration history (non-fatal)${NC}"
+
+echo -e "${GREEN}Applying any migrations newer than the dump...${NC}"
+supabase db push --project-ref ${PROJECT_REF} 2>/dev/null && \
+    echo -e "${GREEN}✓ Migrations up to date${NC}" || \
+    echo -e "${YELLOW}Warning: db push encountered issues (check manually)${NC}"
+popd > /dev/null
+
 
 # Set Edge Function secrets
 echo -e "${GREEN}Setting Edge Function secrets...${NC}"
@@ -558,6 +574,10 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
     echo -e "${GREEN}✓ Anthropic API key set${NC}"
 fi
 
+# Provision LEARN_API_KEY for the Govern integration (profile-lookup + auth endpoints)
+echo -e "${GREEN}Provisioning LEARN_API_KEY for Govern API access...${NC}"
+"${SCRIPT_DIR}/provision-govern-api-key.sh" "${PROJECT_REF}" "${CLIENT_NAME}"
+
 # Deploy Edge Functions (not included in database dumps)
 # Delegates to deploy-functions.sh so this list never gets out of sync.
 echo -e "${GREEN}Deploying Edge Functions...${NC}"
@@ -635,10 +655,39 @@ if [ -n "$MASTER_PROJECT_REF" ]; then
         echo -e "${YELLOW}  Get it from: Supabase Dashboard → Settings → API → service_role key${NC}"
         echo -e "${YELLOW}  Then set manually: supabase secrets set CLIENT_SERVICE_KEY_${PROJECT_REF}=<key> --project-ref ${MASTER_PROJECT_REF}${NC}"
     fi
+
+    # Set MASTER_SUPABASE_URL and MASTER_SUPABASE_SERVICE_ROLE_KEY on the CLIENT project
+    # Required by create-user and delete-user edge functions to write seats_used back
+    # to the master database after every user creation or deletion.
+    echo -e "${GREEN}Setting master DB secrets on client project for license write-back...${NC}"
+    MASTER_SUPABASE_URL="https://${MASTER_PROJECT_REF}.supabase.co"
+    # Retrieve master service role key (same way we retrieved the client key above)
+    MASTER_SERVICE_ROLE_KEY=$(supabase projects api-keys --project-ref ${MASTER_PROJECT_REF} | grep 'service_role' | awk '{print $3}')
+
+    if [ -n "$MASTER_SERVICE_ROLE_KEY" ]; then
+        supabase secrets set \
+            MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL} \
+            MASTER_SUPABASE_SERVICE_ROLE_KEY=${MASTER_SERVICE_ROLE_KEY} \
+            --project-ref ${PROJECT_REF} 2>&1 | tee /tmp/set-master-secrets.log
+
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✓ Master DB secrets set on client project${NC}"
+            echo -e "${GREEN}  MASTER_SUPABASE_URL = ${MASTER_SUPABASE_URL}${NC}"
+        else
+            echo -e "${YELLOW}Warning: Failed to set master DB secrets on client project${NC}"
+            echo -e "${YELLOW}  Set manually:${NC}"
+            echo -e "${YELLOW}  supabase secrets set MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL} MASTER_SUPABASE_SERVICE_ROLE_KEY=<key> --project-ref ${PROJECT_REF}${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Warning: Could not retrieve master service role key${NC}"
+        echo -e "${YELLOW}  Set manually:${NC}"
+        echo -e "${YELLOW}  supabase secrets set MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL} MASTER_SUPABASE_SERVICE_ROLE_KEY=<key> --project-ref ${PROJECT_REF}${NC}"
+    fi
 else
     echo -e "${YELLOW}Note: MASTER_PROJECT_REF not set, skipping sync secret setup${NC}"
     echo -e "${YELLOW}  To enable content syncing, set MASTER_PROJECT_REF environment variable${NC}"
     echo -e "${YELLOW}  Then manually set: supabase secrets set CLIENT_SERVICE_KEY_${PROJECT_REF}=<service_key> --project-ref <master_ref>${NC}"
+    echo -e "${YELLOW}  Also set on client: supabase secrets set MASTER_SUPABASE_URL=https://<master_ref>.supabase.co MASTER_SUPABASE_SERVICE_ROLE_KEY=<key> --project-ref ${PROJECT_REF}${NC}"
 fi
 
 # Verify restore by comparing object counts with source database
@@ -684,7 +733,12 @@ EXPECTED_BUCKETS=("avatars" "documents" "certificates" "logos" "lesson-media")
 TARGET_STORAGE_BUCKETS=$(psql "${CONNECTION_STRING}" -t -c "SELECT COUNT(*) FROM storage.buckets WHERE id IN ('avatars','documents','certificates','logos','lesson-media');" 2>&1 | grep -v "ERROR" | tr -d ' \n')
 
 # Check edge function secrets
-EXPECTED_SECRETS=("GOOGLE_TRANSLATE_API_KEY" "DEEPL_API_KEY" "AUTH_LAMBDA_URL" "APP_BASE_URL" "MANAGER_NOTIFICATION_COOLDOWN_HOURS")
+# MASTER_SUPABASE_URL and MASTER_SUPABASE_SERVICE_ROLE_KEY are only present when MASTER_PROJECT_REF was set
+if [ -n "$MASTER_PROJECT_REF" ]; then
+    EXPECTED_SECRETS=("GOOGLE_TRANSLATE_API_KEY" "DEEPL_API_KEY" "AUTH_LAMBDA_URL" "APP_BASE_URL" "MANAGER_NOTIFICATION_COOLDOWN_HOURS" "MASTER_SUPABASE_URL" "MASTER_SUPABASE_SERVICE_ROLE_KEY")
+else
+    EXPECTED_SECRETS=("GOOGLE_TRANSLATE_API_KEY" "DEEPL_API_KEY" "AUTH_LAMBDA_URL" "APP_BASE_URL" "MANAGER_NOTIFICATION_COOLDOWN_HOURS")
+fi
 SECRETS_LIST=$(supabase secrets list --project-ref ${PROJECT_REF} --output json 2>/dev/null | jq -r '.[].name' 2>/dev/null || echo "")
 TARGET_EDGE_SECRETS=0
 for secret in "${EXPECTED_SECRETS[@]}"; do
@@ -1083,9 +1137,16 @@ else
     echo "  5. Test access at: https://${BASE_DOMAIN}/${CLIENT_NAME}"
     echo "  6. Verify root path (/) shows error (this is expected and correct)"
 fi
-echo "  7. Create admin user using: ./scripts/create-admin-user.sh ${PROJECT_REF} <email> <password> [full-name] [first-name] [last-name]"
-echo "  8. Test user creation and email sending"
-echo "  9. Sync lesson content from master:"
+echo "  7. Send the LEARN_API_KEY printed above to the Govern team via a secure channel (not plain email/Slack)"
+echo "     To rotate the key at any time: ./scripts/provision-govern-api-key.sh ${PROJECT_REF} ${CLIENT_NAME} --rotate"
+echo "  8. Verify license write-back secrets are set on the client project:"
+echo "       supabase secrets list --project-ref ${PROJECT_REF} | grep MASTER"
+echo "     If missing (MASTER_PROJECT_REF was not set during onboarding), set manually:"
+echo "       supabase secrets set MASTER_SUPABASE_URL=https://<master_ref>.supabase.co \\"
+echo "         MASTER_SUPABASE_SERVICE_ROLE_KEY=<key> --project-ref ${PROJECT_REF}"
+echo "  9. Create admin user using: ./scripts/create-admin-user.sh ${PROJECT_REF} <email> <password> [full-name] [first-name] [last-name]"
+echo "  10. Test user creation and email sending"
+echo "  11. Sync lesson content from master:"
 echo "     • Open the Learn app connected to the MASTER database"
 echo "     • Go to Admin → Lesson Sync"
 echo "     • Select all learning tracks and this client (${CLIENT_NAME})"

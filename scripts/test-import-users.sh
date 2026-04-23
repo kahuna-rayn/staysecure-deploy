@@ -306,7 +306,7 @@ cat <<'VERIFY_EOF'
 -- Expected: test-user-1 through test-user-5 should be created
 
 -- Check imported users (should show rows 1-5 only)
-SELECT email, full_name, username, employee_id, access_level 
+SELECT email, full_name, email, employee_id, access_level 
 FROM profiles 
 WHERE email LIKE 'test-%@test.example.com'
 ORDER BY email;

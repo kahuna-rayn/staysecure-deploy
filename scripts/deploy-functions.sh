@@ -117,30 +117,30 @@ if [ "$1" = "--master" ]; then
     exit 0
 fi
 
-# Expand named shortcuts and --all-production / --all into project ref lists.
-# Replace any --dev / --staging tokens in the args with the actual refs.
+# Expand all named shortcuts into actual project refs up front, so flags like
+# --all can appear anywhere in the arg list (e.g. after a function name).
 EXPANDED=()
 for arg in "$@"; do
     case "$arg" in
-        --dev)     EXPANDED+=("$DEV_REF") ;;
-        --staging) EXPANDED+=("$STAGING_REF") ;;
-        *)         EXPANDED+=("$arg") ;;
+        --dev)            EXPANDED+=("$DEV_REF") ;;
+        --staging)        EXPANDED+=("$STAGING_REF") ;;
+        --all-production)
+            if [ ${#PRODUCTION_CLIENT_REFS[@]} -eq 0 ]; then
+                echo -e "${YELLOW}No production client refs configured yet.${NC}"
+            else
+                EXPANDED+=("${PRODUCTION_CLIENT_REFS[@]}")
+            fi
+            ;;
+        --all)
+            EXPANDED+=("$DEV_REF" "$STAGING_REF")
+            if [ ${#PRODUCTION_CLIENT_REFS[@]} -gt 0 ]; then
+                EXPANDED+=("${PRODUCTION_CLIENT_REFS[@]}")
+            fi
+            ;;
+        *)                EXPANDED+=("$arg") ;;
     esac
 done
 set -- "${EXPANDED[@]}"
-
-if [ "$1" = "--all-production" ]; then
-    if [ ${#PRODUCTION_CLIENT_REFS[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No production client refs configured yet. Add them to PRODUCTION_CLIENT_REFS in this script.${NC}"
-        exit 0
-    fi
-    echo -e "${GREEN}Deploying to ${#PRODUCTION_CLIENT_REFS[@]} production client(s)...${NC}"
-    set -- "${PRODUCTION_CLIENT_REFS[@]}"
-elif [ "$1" = "--all" ]; then
-    ALL_REFS=("$DEV_REF" "$STAGING_REF" "${PRODUCTION_CLIENT_REFS[@]}")
-    echo -e "${GREEN}Deploying to all known projects (dev + staging + ${#PRODUCTION_CLIENT_REFS[@]} production client(s))...${NC}"
-    set -- "${ALL_REFS[@]}"
-fi
 
 if [[ "$1" == *"-"* ]]; then
     # Treat as a function name — validate it exists before proceeding

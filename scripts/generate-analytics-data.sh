@@ -64,7 +64,7 @@ fi
 
 # Show sample users
 echo -e "${YELLOW}Sample users that will be used:${NC}"
-psql "${CONNECTION_STRING}" -t -c "SELECT id, full_name, username FROM public.profiles LIMIT 5;" 2>&1 | grep -v "ERROR" | while read -r line; do
+psql "${CONNECTION_STRING}" -t -c "SELECT id, full_name, email FROM public.profiles LIMIT 5;" 2>&1 | grep -v "ERROR" | while read -r line; do
     if [ -n "$line" ]; then
         echo "  $line"
     fi

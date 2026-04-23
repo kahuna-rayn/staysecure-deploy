@@ -581,7 +581,7 @@ async function main() {
 
     if (result === 'already_exists') {
       alreadyExisted++;
-      const { data } = await supabase.from('profiles').select('id').eq('username', m.email).maybeSingle();
+      const { data } = await supabase.from('profiles').select('id').eq('email', m.email).maybeSingle();
       userId = data?.id;
     } else if (result === null) {
       createErrors++;
@@ -592,7 +592,7 @@ async function main() {
       userId = result ?? undefined;
       await new Promise((r) => setTimeout(r, 600));
       if (!userId) {
-        const { data } = await supabase.from('profiles').select('id').eq('username', m.email).maybeSingle();
+        const { data } = await supabase.from('profiles').select('id').eq('email', m.email).maybeSingle();
         userId = data?.id;
       }
     }
