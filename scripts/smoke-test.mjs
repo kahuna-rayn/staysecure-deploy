@@ -208,7 +208,7 @@ console.log(`\n${BOLD}3. Edge function — request-activation-link${RESET}`);
   const fakeEmail = `smoke-test-nonexistent-${Date.now()}@example-smoke.invalid`;
   const { status, body } = await post(
     `${FN}/request-activation-link`,
-    { apikey: ANON_KEY || SERVICE_ROLE_KEY },
+    { apikey: ANON_KEY || SERVICE_ROLE_KEY, Authorization: `Bearer ${ANON_KEY || SERVICE_ROLE_KEY}` },
     { email: fakeEmail, redirectUrl: `${SUPABASE_URL}/activate` }
   );
   if (status === 404) {
@@ -228,7 +228,7 @@ if (!LEARN_API_KEY) {
 } else {
   const { status, body } = await get(
     `${FN}/profile-lookup/v1/profiles?page_size=1`,
-    { Authorization: `Bearer ${LEARN_API_KEY}` }
+    { apikey: ANON_KEY || SERVICE_ROLE_KEY, Authorization: `Bearer ${LEARN_API_KEY}` }
   );
   if (status === 200 && body?.data !== undefined) {
     const firstProfile = body.data?.[0];
