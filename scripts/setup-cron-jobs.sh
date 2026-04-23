@@ -25,7 +25,13 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-MASTER_PROJECT_REF="oownotmpcqcgojhrzqaj"
+# ── Known project refs (sourced from shared config) ──────────────────────────
+PROJECTS_CONF="${SCRIPT_DIR}/../../learn/secrets/projects.conf"
+if [ ! -f "${PROJECTS_CONF}" ]; then
+    echo -e "${RED}Error: projects.conf not found at ${PROJECTS_CONF}${NC}"
+    exit 1
+fi
+source "${PROJECTS_CONF}"
 
 # ── Resolve project name → ref ────────────────────────────────────────────────
 # Accepts either a 20-char project ref (used as-is) or a project name (looked up).
@@ -51,21 +57,25 @@ resolve_ref() {
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 if [ $# -eq 0 ]; then
-    echo -e "${RED}Error: At least one project name or ref is required${NC}"
+    echo -e "${RED}Error: At least one project name, ref, or flag is required${NC}"
     echo "Usage:"
     echo "  ./setup-cron-jobs.sh <project-name-or-ref> [...]"
+    echo "  ./setup-cron-jobs.sh --dev"
+    echo "  ./setup-cron-jobs.sh --staging"
     echo "  ./setup-cron-jobs.sh --all-production"
     echo "  ./setup-cron-jobs.sh --all"
     echo "  ./setup-cron-jobs.sh --master"
     echo ""
-    echo "  --all-production  All projects whose name ends in '-prod'"
-    echo "  --all             Every project in the org"
+    echo "  --dev             Dev project (${DEV_REF})"
+    echo "  --staging         Staging project (${STAGING_REF})"
+    echo "  --all-production  All production clients (from learn/secrets/projects.conf)"
+    echo "  --all             Dev + staging + all production clients"
     echo "  --master          Master DB only (reconcile-license-usage + expiry digest)"
     echo ""
     echo "Examples:"
-    echo "  ./setup-cron-jobs.sh acme-prod"
-    echo "  ./setup-cron-jobs.sh acme-prod globex-prod"
-    echo "  ./setup-cron-jobs.sh cleqfnrbiqpxpzxkatda   # ref also accepted"
+    echo "  ./setup-cron-jobs.sh --dev"
+    echo "  ./setup-cron-jobs.sh acme-prod            # project name resolved via Supabase CLI"
+    echo "  ./setup-cron-jobs.sh cleqfnrbiqpxpzxkatda # raw ref also accepted"
     exit 1
 fi
 
@@ -144,35 +154,28 @@ SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'reconcile-licens
     exit 0
 fi
 
+# Expand --dev / --staging shortcuts before flag processing
+EXPANDED=()
+for arg in "$@"; do
+    case "$arg" in
+        --dev)     EXPANDED+=("$DEV_REF") ;;
+        --staging) EXPANDED+=("$STAGING_REF") ;;
+        *)         EXPANDED+=("$arg") ;;
+    esac
+done
+set -- "${EXPANDED[@]}"
+
 if [ "$1" = "--all-production" ]; then
-    echo -e "${GREEN}Querying Supabase for production projects (*-prod)...${NC}"
-    RESOLVED=()
-    while IFS= read -r ref; do
-        [ -n "$ref" ] && RESOLVED+=("$ref")
-    done < <(supabase projects list --output json 2>/dev/null \
-        | jq -r '.[] | select(.name | endswith("-prod")) | .id')
-    if [ ${#RESOLVED[@]} -eq 0 ]; then
-        echo -e "${RED}Error: No projects with names ending in '-prod' found.${NC}"; exit 1
+    if [ ${#PRODUCTION_CLIENT_REFS[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No production client refs configured yet. Add them to learn/secrets/projects.conf.${NC}"
+        exit 0
     fi
-    echo -e "${GREEN}Found ${#RESOLVED[@]} production project(s):${NC}"
-    supabase projects list --output json 2>/dev/null \
-        | jq -r '.[] | select(.name | endswith("-prod")) | "  \(.id)  \(.name)"'
-    echo ""
-    set -- "${RESOLVED[@]}"
+    echo -e "${GREEN}Setting up cron jobs for ${#PRODUCTION_CLIENT_REFS[@]} production client(s)...${NC}"
+    set -- "${PRODUCTION_CLIENT_REFS[@]}"
 elif [ "$1" = "--all" ]; then
-    echo -e "${GREEN}Querying Supabase for all projects...${NC}"
-    RESOLVED=()
-    while IFS= read -r ref; do
-        [ -n "$ref" ] && RESOLVED+=("$ref")
-    done < <(supabase projects list --output json 2>/dev/null | jq -r '.[].id')
-    if [ ${#RESOLVED[@]} -eq 0 ]; then
-        echo -e "${RED}Error: No projects found.${NC}"; exit 1
-    fi
-    echo -e "${GREEN}Found ${#RESOLVED[@]} project(s):${NC}"
-    supabase projects list --output json 2>/dev/null \
-        | jq -r '.[] | "  \(.id)  \(.name)"'
-    echo ""
-    set -- "${RESOLVED[@]}"
+    ALL_REFS=("$DEV_REF" "$STAGING_REF" "${PRODUCTION_CLIENT_REFS[@]}")
+    echo -e "${GREEN}Setting up cron jobs for all known projects (dev + staging + ${#PRODUCTION_CLIENT_REFS[@]} production client(s))...${NC}"
+    set -- "${ALL_REFS[@]}"
 else
     # Resolve any project names in the argument list to refs
     RESOLVED=()
