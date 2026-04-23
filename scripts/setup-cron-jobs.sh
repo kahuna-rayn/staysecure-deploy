@@ -11,6 +11,7 @@
 #   ./setup-cron-jobs.sh <project-ref> [project-ref2] ...
 #   ./setup-cron-jobs.sh --all-production   (all projects with name ending in -prod)
 #   ./setup-cron-jobs.sh --all              (every project in the org)
+#   ./setup-cron-jobs.sh --master           (master DB only: reconcile + expiry digest)
 #
 # PGPASSWORD must be set in the environment (or in deploy/.env.local / deploy/.env).
 # The service role key is fetched automatically via `supabase projects api-keys`.
@@ -24,6 +25,8 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+MASTER_PROJECT_REF="oownotmpcqcgojhrzqaj"
+
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 if [ $# -eq 0 ]; then
@@ -32,10 +35,87 @@ if [ $# -eq 0 ]; then
     echo "  ./setup-cron-jobs.sh <project-ref> [project-ref2] ..."
     echo "  ./setup-cron-jobs.sh --all-production"
     echo "  ./setup-cron-jobs.sh --all"
+    echo "  ./setup-cron-jobs.sh --master"
     echo ""
     echo "  --all-production  All projects whose name ends in '-prod'"
     echo "  --all             Every project in the org"
+    echo "  --master          Master DB only (reconcile-license-usage + expiry digest)"
     exit 1
+fi
+
+# ── Master DB cron setup ───────────────────────────────────────────────────────
+
+if [ "$1" = "--master" ]; then
+    echo -e "${GREEN}Setting up cron jobs for master DB: ${MASTER_PROJECT_REF}${NC}"
+
+    # Load env
+    if [ -f "${SCRIPT_DIR}/../.env.local" ]; then
+        source "${SCRIPT_DIR}/../.env.local"
+    elif [ -f "${SCRIPT_DIR}/../.env" ]; then
+        source "${SCRIPT_DIR}/../.env"
+    fi
+
+    if [ -z "$PGPASSWORD" ]; then
+        echo -e "${RED}Error: PGPASSWORD is not set${NC}"; exit 1
+    fi
+
+    SERVICE_ROLE_KEY=$(supabase projects api-keys --project-ref "${MASTER_PROJECT_REF}" 2>/dev/null \
+        | grep 'service_role' | awk '{print $3}')
+
+    if [ -z "$SERVICE_ROLE_KEY" ]; then
+        echo -e "${RED}Error: Could not retrieve service role key for master project${NC}"; exit 1
+    fi
+
+    REGION="${REGION:-ap-southeast-1}"
+    POOLER_HOST="${POOLER_HOST:-aws-1-${REGION}.pooler.supabase.com}"
+    DB_HOSTNAME="db.${MASTER_PROJECT_REF}.supabase.co"
+
+    RESOLVED_ADDR=$(dig AAAA +short "${DB_HOSTNAME}" 2>/dev/null | grep -v '^\.' | head -1)
+    if [ -n "$RESOLVED_ADDR" ] && ping6 -c 1 -W 2 "${RESOLVED_ADDR}" &>/dev/null; then
+        export PGHOSTADDR="${RESOLVED_ADDR}"
+        PG_HOST="${DB_HOSTNAME}"; PG_PORT=6543; PG_USER="postgres"
+    else
+        unset PGHOSTADDR
+        PG_HOST="${POOLER_HOST}"; PG_PORT=5432; PG_USER="postgres.${MASTER_PROJECT_REF}"
+    fi
+
+    CONNECTION_STRING="host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=postgres sslmode=require"
+    AUTH_HEADER_ESCAPED=$(echo "Bearer ${SERVICE_ROLE_KEY}" | sed "s/'/''/g")
+    RECONCILE_URL_ESCAPED=$(echo "https://${MASTER_PROJECT_REF}.supabase.co/functions/v1/reconcile-license-usage" | sed "s/'/''/g")
+
+    psql "${CONNECTION_STRING}" <<SQL
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+-- reconcile-license-usage + expiry digest (02:00 UTC daily)
+DO \$\$ BEGIN PERFORM cron.unschedule('reconcile-license-usage'); EXCEPTION WHEN others THEN NULL; END \$\$;
+SELECT cron.schedule(
+  'reconcile-license-usage',
+  '0 2 * * *',
+  format(
+    \$cron\$
+      SELECT net.http_post(
+        url     := %L,
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', %L
+        ),
+        body    := '{}'::jsonb
+      );
+    \$cron\$,
+    '${RECONCILE_URL_ESCAPED}',
+    '${AUTH_HEADER_ESCAPED}'
+  )
+);
+SQL
+
+    psql "${CONNECTION_STRING}" -c "
+SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'reconcile-license-usage';
+" 2>/dev/null || true
+
+    echo -e "${GREEN}✓ Master cron jobs configured${NC}"
+    echo "  reconcile-license-usage → 02:00 UTC daily (reconcile seats_used + expiry digest)"
+    exit 0
 fi
 
 if [ "$1" = "--all-production" ]; then
