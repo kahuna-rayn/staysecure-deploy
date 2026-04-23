@@ -126,13 +126,18 @@ const envVars = parseEnvFile(envFile);
 const SUPABASE_URL = envVars.VITE_SUPABASE_URL || `https://${projectRef}.supabase.co`;
 const ANON_KEY     = envVars.VITE_SUPABASE_ANON_KEY;
 const LEARN_API_KEY = envVars.LEARN_API_KEY;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+let SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!SERVICE_ROLE_KEY) {
-  console.error(`${RED}Missing SUPABASE_SERVICE_ROLE_KEY env var.${RESET}`);
-  console.error('Get it from: Supabase dashboard → Project Settings → API → service_role key');
-  console.error(`Usage: SUPABASE_SERVICE_ROLE_KEY=xxx node scripts/smoke-test.mjs ${arg}`);
-  process.exit(1);
+  const { createInterface } = await import('readline');
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  SERVICE_ROLE_KEY = await new Promise(resolve => {
+    rl.question(`${YELLOW}SUPABASE_SERVICE_ROLE_KEY not set. Enter service role key for ${projectRef}: ${RESET}`, answer => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+  console.error('');
 }
 
 const REST   = `${SUPABASE_URL}/rest/v1`;
