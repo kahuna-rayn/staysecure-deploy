@@ -136,9 +136,9 @@ check_contains "DB-05a" \
     "email" ""
 
 check_contains "DB-05b" \
-    "handle_new_user uses lowercase 'author' enum value" \
+    "handle_new_user assigns lowercase 'author' enum value (not 'Author')" \
     "SELECT pg_get_functiondef(oid) FROM pg_proc WHERE proname='handle_new_user'" \
-    "'author'" "'Author'"
+    "assigned_role := 'author'" "assigned_role := 'Author'"
 
 echo ""
 echo "────────────────────────────────────────────────────"
