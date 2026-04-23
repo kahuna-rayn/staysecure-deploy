@@ -212,6 +212,31 @@ SELECT cron.schedule(
     '${AUTH_HEADER_ESCAPED}'
   )
 );
+
+-- ── Job 4: license_expiry  (08:00 UTC daily) ──────────────────────────────────
+DO \$\$
+BEGIN
+  PERFORM cron.unschedule('process-license-expiry-notifications');
+EXCEPTION WHEN others THEN NULL;
+END \$\$;
+SELECT cron.schedule(
+  'process-license-expiry-notifications',
+  '0 8 * * *',
+  format(
+    \$cron\$
+      SELECT net.http_post(
+        url     := %L,
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', %L
+        ),
+        body    := jsonb_build_object('notification_type', 'license_expiry')
+      );
+    \$cron\$,
+    '${NOTIFICATIONS_URL_ESCAPED}',
+    '${AUTH_HEADER_ESCAPED}'
+  )
+);
 SQL
 
     if [ $? -ne 0 ]; then
@@ -227,15 +252,17 @@ FROM cron.job
 WHERE jobname IN (
   'process-manager-notifications',
   'process-staff-pending-notifications',
-  'send-daily-lesson-reminders'
+  'send-daily-lesson-reminders',
+  'process-license-expiry-notifications'
 )
 ORDER BY jobname;
 " 2>/dev/null || true
 
     echo -e "${GREEN}✓ Cron jobs configured for ${PROJECT_REF}${NC}"
-    echo "  process-manager-notifications       → 01:00 UTC daily (manager_employee_incomplete)"
-    echo "  process-staff-pending-notifications → 01:00 UTC daily (manager_staff_pending)"
-    echo "  send-daily-lesson-reminders         → 09:00 UTC daily (lesson reminders)"
+    echo "  process-license-expiry-notifications → 08:00 UTC daily (license_expiry)"
+    echo "  process-manager-notifications        → 01:00 UTC daily (manager_employee_incomplete)"
+    echo "  process-staff-pending-notifications  → 01:00 UTC daily (manager_staff_pending)"
+    echo "  send-daily-lesson-reminders          → 09:00 UTC daily (lesson reminders)"
 done
 
 echo ""
