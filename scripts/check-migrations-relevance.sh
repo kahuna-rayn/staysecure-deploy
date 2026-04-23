@@ -219,6 +219,27 @@ fi
 
 echo ""
 
+# 4. Check username→email refactor migration (Apr 2026)
+echo -e "${CYAN}4. Username → Email Refactor Migration${NC}"
+
+profiles_email=$(run_query "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='profiles' AND column_name='email');")
+profiles_username=$(run_query "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='profiles' AND column_name='username');")
+inventory_email=$(run_query "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='account_inventory' AND column_name='email');")
+inventory_username_email=$(run_query "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='account_inventory' AND column_name='username_email');")
+
+if [ "$profiles_email" = "t" ] && [ "$profiles_username" = "f" ] && [ "$inventory_email" = "t" ] && [ "$inventory_username_email" = "f" ]; then
+    echo -e "  ✅ ${GREEN}20260422000000_rename_username_to_email.sql${NC} - Already applied (profiles.email and account_inventory.email exist; old columns gone)"
+    ARCHIVED+=("20260422000000_rename_username_to_email.sql")
+elif [ "$profiles_username" = "t" ] || [ "$inventory_username_email" = "t" ]; then
+    echo -e "  ❌ ${RED}20260422000000_rename_username_to_email.sql${NC} - Not yet applied (old columns still exist)"
+    KEEP+=("20260422000000_rename_username_to_email.sql")
+else
+    echo -e "  ⚠️  ${YELLOW}20260422000000_rename_username_to_email.sql${NC} - Needs manual verification"
+    UNKNOWN+=("20260422000000_rename_username_to_email.sql")
+fi
+
+echo ""
+
 # Summary
 echo -e "${BLUE}=== Summary ===${NC}"
 echo ""
