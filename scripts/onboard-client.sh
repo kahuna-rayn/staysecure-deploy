@@ -339,7 +339,43 @@ if [ -f "backups/schema.dump" ]; then
     else
         echo -e "${YELLOW}Warning: seed_email_templates.sql not found — email_preferences will not be seeded${NC}"
     fi
-    
+
+    # Seed standard system documents (IRP, ISP, DPP, Cybersecurity Handbook)
+    # CHH PDF is uploaded to this client's storage if the file is present locally.
+    _SEED_SERVICE_KEY=$(supabase projects api-keys --project-ref "${PROJECT_REF}" 2>/dev/null | grep 'service_role' | awk '{print $3}')
+    _HANDBOOK_PDF="${SCRIPT_DIR}/../assets/cybersecurity-handbook-all-staff.pdf"
+    _HANDBOOK_STORAGE_URL="https://${PROJECT_REF}.supabase.co/storage/v1/object/public/documents/cybersecurity-handbook-all-staff.pdf"
+    _HANDBOOK_URL_VAR="handbook_url="
+
+    if [ -f "$_HANDBOOK_PDF" ] && [ -n "$_SEED_SERVICE_KEY" ]; then
+        echo -e "${GREEN}Uploading Cybersecurity Handbook PDF to client storage...${NC}"
+        _UPLOAD_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+            "https://${PROJECT_REF}.supabase.co/storage/v1/object/documents/cybersecurity-handbook-all-staff.pdf" \
+            -H "Authorization: Bearer ${_SEED_SERVICE_KEY}" \
+            -H "Content-Type: application/pdf" \
+            --data-binary @"$_HANDBOOK_PDF" 2>/dev/null || echo "000")
+        if [[ "$_UPLOAD_HTTP" =~ ^2 ]]; then
+            echo -e "${GREEN}✓ CHH PDF uploaded (HTTP ${_UPLOAD_HTTP})${NC}"
+            _HANDBOOK_URL_VAR="handbook_url=${_HANDBOOK_STORAGE_URL}"
+        else
+            echo -e "${YELLOW}Warning: CHH PDF upload failed (HTTP ${_UPLOAD_HTTP}) — url will be null${NC}"
+        fi
+    else
+        [ ! -f "$_HANDBOOK_PDF" ] && echo -e "${YELLOW}Note: CHH PDF not found at ${_HANDBOOK_PDF} — skipping upload${NC}"
+        [ -z "$_SEED_SERVICE_KEY" ] && echo -e "${YELLOW}Note: Could not retrieve service key — skipping CHH upload${NC}"
+    fi
+
+    if [ -f "${SCRIPT_DIR}/seed-standard-documents.sql" ]; then
+        echo -e "${GREEN}Seeding standard system documents (IRP, ISP, DPP, CHH)...${NC}"
+        psql "${CONNECTION_STRING}" \
+            --variable="${_HANDBOOK_URL_VAR}" \
+            --file "${SCRIPT_DIR}/seed-standard-documents.sql" \
+            && echo -e "${GREEN}✓ Standard documents seeded${NC}" \
+            || echo -e "${YELLOW}Warning: seed-standard-documents.sql failed — documents may need manual seeding${NC}"
+    else
+        echo -e "${YELLOW}Warning: seed-standard-documents.sql not found — standard documents not seeded${NC}"
+    fi
+
     echo -e "${GREEN}✓ Backup restored successfully${NC}"
 elif [ -f "backups/schema.sql" ]; then
     echo -e "${GREEN}Restoring from SQL format backup (${DATA_TYPE} data)...${NC}"
@@ -434,7 +470,42 @@ elif [ -f "backups/schema.sql" ]; then
     else
         echo -e "${YELLOW}Warning: seed_email_templates.sql not found — email_preferences will not be seeded${NC}"
     fi
-    
+
+    # Seed standard system documents (IRP, ISP, DPP, Cybersecurity Handbook)
+    _SEED_SERVICE_KEY=$(supabase projects api-keys --project-ref "${PROJECT_REF}" 2>/dev/null | grep 'service_role' | awk '{print $3}')
+    _HANDBOOK_PDF="${SCRIPT_DIR}/../assets/cybersecurity-handbook-all-staff.pdf"
+    _HANDBOOK_STORAGE_URL="https://${PROJECT_REF}.supabase.co/storage/v1/object/public/documents/cybersecurity-handbook-all-staff.pdf"
+    _HANDBOOK_URL_VAR="handbook_url="
+
+    if [ -f "$_HANDBOOK_PDF" ] && [ -n "$_SEED_SERVICE_KEY" ]; then
+        echo -e "${GREEN}Uploading Cybersecurity Handbook PDF to client storage...${NC}"
+        _UPLOAD_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+            "https://${PROJECT_REF}.supabase.co/storage/v1/object/documents/cybersecurity-handbook-all-staff.pdf" \
+            -H "Authorization: Bearer ${_SEED_SERVICE_KEY}" \
+            -H "Content-Type: application/pdf" \
+            --data-binary @"$_HANDBOOK_PDF" 2>/dev/null || echo "000")
+        if [[ "$_UPLOAD_HTTP" =~ ^2 ]]; then
+            echo -e "${GREEN}✓ CHH PDF uploaded (HTTP ${_UPLOAD_HTTP})${NC}"
+            _HANDBOOK_URL_VAR="handbook_url=${_HANDBOOK_STORAGE_URL}"
+        else
+            echo -e "${YELLOW}Warning: CHH PDF upload failed (HTTP ${_UPLOAD_HTTP}) — url will be null${NC}"
+        fi
+    else
+        [ ! -f "$_HANDBOOK_PDF" ] && echo -e "${YELLOW}Note: CHH PDF not found at ${_HANDBOOK_PDF} — skipping upload${NC}"
+        [ -z "$_SEED_SERVICE_KEY" ] && echo -e "${YELLOW}Note: Could not retrieve service key — skipping CHH upload${NC}"
+    fi
+
+    if [ -f "${SCRIPT_DIR}/seed-standard-documents.sql" ]; then
+        echo -e "${GREEN}Seeding standard system documents (IRP, ISP, DPP, CHH)...${NC}"
+        psql "${CONNECTION_STRING}" \
+            --variable="${_HANDBOOK_URL_VAR}" \
+            --file "${SCRIPT_DIR}/seed-standard-documents.sql" \
+            && echo -e "${GREEN}✓ Standard documents seeded${NC}" \
+            || echo -e "${YELLOW}Warning: seed-standard-documents.sql failed — documents may need manual seeding${NC}"
+    else
+        echo -e "${YELLOW}Warning: seed-standard-documents.sql not found — standard documents not seeded${NC}"
+    fi
+
     echo -e "${GREEN}✓ Backup restored successfully${NC}"
 else
     echo -e "${YELLOW}No backup found, applying schema files...${NC}"
