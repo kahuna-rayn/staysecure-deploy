@@ -247,6 +247,7 @@ for PROJECT_REF in "$@"; do
     AUTH_HEADER_ESCAPED=$(echo "Bearer ${SERVICE_ROLE_KEY}" | sed "s/'/''/g")
     NOTIFICATIONS_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/process-scheduled-notifications" | sed "s/'/''/g")
     REMINDERS_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/send-lesson-reminders" | sed "s/'/''/g")
+    DEVICE_INGEST_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/device-ingest/v1/sync" | sed "s/'/''/g")
 
     psql "${CONNECTION_STRING}" <<SQL
 -- Ensure required extensions are present
@@ -337,7 +338,33 @@ SELECT cron.schedule(
   )
 );
 
--- ── Job 4: license_expiry  (08:00 UTC daily) ──────────────────────────────────
+-- ── Job 4: device-ingest  (02:30 UTC daily) ─────────────────────────────────
+-- No-op if device_source is not configured in org_profile.
+DO \$\$
+BEGIN
+  PERFORM cron.unschedule('device-sync-nightly');
+EXCEPTION WHEN others THEN NULL;
+END \$\$;
+SELECT cron.schedule(
+  'device-sync-nightly',
+  '30 2 * * *',
+  format(
+    \$cron\$
+      SELECT net.http_post(
+        url     := %L,
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', %L
+        ),
+        body    := '{}'::jsonb
+      );
+    \$cron\$,
+    '${DEVICE_INGEST_URL_ESCAPED}',
+    '${AUTH_HEADER_ESCAPED}'
+  )
+);
+
+-- ── Job 5: license_expiry  (08:00 UTC daily) ──────────────────────────────────
 DO \$\$
 BEGIN
   PERFORM cron.unschedule('process-license-expiry-notifications');
@@ -377,12 +404,14 @@ WHERE jobname IN (
   'process-manager-notifications',
   'process-staff-pending-notifications',
   'send-daily-lesson-reminders',
-  'process-license-expiry-notifications'
+  'process-license-expiry-notifications',
+  'device-sync-nightly'
 )
 ORDER BY jobname;
 " 2>/dev/null || true
 
     echo -e "${GREEN}✓ Cron jobs configured for ${DISPLAY}${NC}"
+    echo "  device-sync-nightly                  → 02:30 UTC daily (device-ingest; no-op if not configured)"
     echo "  process-license-expiry-notifications → 08:00 UTC daily (license_expiry)"
     echo "  process-manager-notifications        → 01:00 UTC daily (manager_employee_incomplete)"
     echo "  process-staff-pending-notifications  → 01:00 UTC daily (manager_staff_pending)"

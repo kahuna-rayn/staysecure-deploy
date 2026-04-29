@@ -116,30 +116,13 @@ while true; do
 done
 
 # ---------------------------------------------------------------------------
-# Write snapshot
+# Write initial snapshot (enriched_sample added later after enriched fetch)
 # ---------------------------------------------------------------------------
 
 fetched=$(echo "$all_profiles" | jq 'length')
 org_data=$(echo "$org_response" | jq '.data')
 
-jq -n \
-  --arg pulled_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-  --arg project_ref "$PROJECT_REF" \
-  --argjson total_count "$total_count" \
-  --argjson fetched "$fetched" \
-  --argjson org "$org_data" \
-  --argjson profiles "$all_profiles" \
-  '{
-    pulled_at: $pulled_at,
-    project_ref: $project_ref,
-    org: $org,
-    total_count: $total_count,
-    fetched: $fetched,
-    profiles: $profiles
-  }' > "$OUTPUT_FILE"
-
-echo -e "${GREEN}Done. ${fetched}/${total_count} profiles written to:${NC}"
-echo "  $OUTPUT_FILE"
+echo -e "${GREEN}Done. ${fetched}/${total_count} profiles fetched.${NC}"
 
 # ---------------------------------------------------------------------------
 # Quick validation summary
@@ -156,3 +139,83 @@ echo "$all_profiles" | jq '
     inactive:        (map(select(.status == "Inactive")) | length)
   }
 '
+
+# ---------------------------------------------------------------------------
+# Enriched single-user endpoint — fetch first 5 profiles fully enriched
+# ---------------------------------------------------------------------------
+
+ENRICHED_SAMPLE_SIZE=5
+enriched_sample="[]"
+enriched_ok=0
+enriched_fail=0
+
+sample_uuids=$(echo "$all_profiles" | jq -r ".[0:${ENRICHED_SAMPLE_SIZE}][].id")
+
+if [[ -n "$sample_uuids" ]]; then
+  echo ""
+  echo -e "${YELLOW}Fetching enriched data for first ${ENRICHED_SAMPLE_SIZE} profiles...${NC}"
+
+  while IFS= read -r uuid; do
+    [[ -z "$uuid" ]] && continue
+
+    single_response=$(curl -sf \
+      "${BASE_URL}/v1/profiles/${uuid}" \
+      -H "Authorization: Bearer ${API_KEY}" \
+      -H "Content-Type: application/json") || {
+      echo -e "${RED}  ✗ ${uuid} — request failed${NC}"
+      enriched_fail=$((enriched_fail + 1))
+      continue
+    }
+
+    # Validate expected enriched keys (null is valid — check key existence)
+    missing_keys=""
+    for key in track_status departments roles documents manager_email; do
+      if ! echo "$single_response" | jq -e ".data | has(\"${key}\")" > /dev/null 2>&1; then
+        missing_keys="${missing_keys} ${key}"
+      fi
+    done
+
+    if [[ -n "$missing_keys" ]]; then
+      echo -e "${RED}  ✗ ${uuid} — missing keys:${missing_keys}${NC}"
+      enriched_fail=$((enriched_fail + 1))
+    else
+      echo -e "${GREEN}  ✓ ${uuid}${NC}"
+      enriched_ok=$((enriched_ok + 1))
+      enriched_sample=$(echo "$enriched_sample $(echo "$single_response" | jq '.data')" | jq -s '.[0] + [.[1]]')
+    fi
+  done <<< "$sample_uuids"
+
+  echo ""
+  if [[ $enriched_fail -eq 0 ]]; then
+    echo -e "${GREEN}✓ All ${enriched_ok} enriched profiles OK${NC}"
+  else
+    echo -e "${RED}${enriched_fail} enriched profile(s) failed, ${enriched_ok} succeeded${NC}"
+  fi
+else
+  echo -e "${YELLOW}No profiles returned — skipping enriched sample${NC}"
+fi
+
+# ---------------------------------------------------------------------------
+# Write snapshot with enriched_sample
+# ---------------------------------------------------------------------------
+
+jq -n \
+  --arg pulled_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --arg project_ref "$PROJECT_REF" \
+  --argjson total_count "$total_count" \
+  --argjson fetched "$fetched" \
+  --argjson org "$org_data" \
+  --argjson profiles "$all_profiles" \
+  --argjson enriched_sample "$enriched_sample" \
+  '{
+    pulled_at: $pulled_at,
+    project_ref: $project_ref,
+    org: $org,
+    total_count: $total_count,
+    fetched: $fetched,
+    profiles: $profiles,
+    enriched_sample: $enriched_sample
+  }' > "$OUTPUT_FILE"
+
+echo -e "${GREEN}Snapshot updated with enriched_sample (${enriched_ok} profiles):${NC}"
+echo "  $OUTPUT_FILE"
