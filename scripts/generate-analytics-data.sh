@@ -3,6 +3,17 @@
 # Generate Analytics Demo Data
 # Inserts synthetic rows into analytics tables using existing profile IDs and published content.
 #
+# Preferred profiles: analytics rows are sampled from these IDs (when they exist in
+# public.profiles) plus other profiles until the pool reaches nine users — not from
+# the entire tenant user list.
+#
+# UUID | full_name | email (reference only; rows key off id)
+# 16ecc3d7-9b51-4309-ba95-54ede97c2d11 | Sasikumar Balakrishnan | sasikumar.balakrishnan@raynsecure.com
+# d8527f9b-66f7-4e78-a481-a603fdb8b567 | ANDREW ONG WAI KIN | andrew.ongwk@gmail.com
+# 8f5197f0-f2d2-46e6-bbb3-f6971414134c | Naresh Super Admin | naresh.parshotam@raynsecure.com
+# e5b43f83-f2cb-49c2-a036-558c2336d5a7 | Richard Super Admin Dev | richard.pereira@raynsecure.com
+# e0bf6e6b-41b7-40e1-848d-b233bbb358a7 | Yew Hong Leong | yewhong.leong@raynsecure.com
+#
 # Prerequisites: PGPASSWORD (optionally from .env / .env.local in the script directory or parent).
 #
 # Staging only (matches learn/secrets/projects.conf STAGING_REF) — avoids accidental prod/dev runs.
@@ -189,8 +200,48 @@ for PROJECT_REF in "${UNIQUE_REFS[@]}"; do
         continue
     fi
 
-    echo -e "${YELLOW}Sample users that will be used:${NC}"
-    psql "${CONNECTION_STRING}" -t -c "SELECT id, full_name, email FROM public.profiles LIMIT 5;" 2>&1 | while read -r line; do
+    echo -e "${YELLOW}Sample users (preferred pool — five listed IDs + others to max 9):${NC}"
+    psql "${CONNECTION_STRING}" -t -c "
+WITH preferred AS (
+  SELECT u.id, u.ord FROM unnest(ARRAY[
+    '16ecc3d7-9b51-4309-ba95-54ede97c2d11'::uuid,
+    'd8527f9b-66f7-4e78-a481-a603fdb8b567'::uuid,
+    '8f5197f0-f2d2-46e6-bbb3-f6971414134c'::uuid,
+    'e5b43f83-f2cb-49c2-a036-558c2336d5a7'::uuid,
+    'e0bf6e6b-41b7-40e1-848d-b233bbb358a7'::uuid
+  ]) WITH ORDINALITY AS u(id, ord)
+),
+pref_found AS (
+  SELECT pf.id, pf.ord
+  FROM preferred pf
+  INNER JOIN public.profiles pr ON pr.id = pf.id
+),
+pref_arr AS (
+  SELECT COALESCE(
+    (SELECT array_agg(id ORDER BY ord) FROM pref_found),
+    ARRAY[]::uuid[]
+  ) AS ids
+),
+sizes AS (
+  SELECT ids, GREATEST(0, 9 - cardinality(ids))::bigint AS need FROM pref_arr
+),
+extras_ranked AS (
+  SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.id) AS rn
+  FROM public.profiles p
+  CROSS JOIN sizes s
+  WHERE NOT (p.id = ANY(s.ids))
+),
+extra AS (
+  SELECT er.id FROM extras_ranked er
+  CROSS JOIN sizes s
+  WHERE er.rn <= s.need
+)
+(SELECT pr.id, pr.full_name, pr.email FROM pref_found pf
+JOIN public.profiles pr ON pr.id = pf.id
+ORDER BY pf.ord)
+UNION ALL
+SELECT pr.id, pr.full_name, pr.email FROM extra e JOIN public.profiles pr ON pr.id = e.id;
+" 2>&1 | while read -r line; do
         if [ -n "$line" ]; then
             echo "  $line"
         fi
@@ -247,6 +298,16 @@ DECLARE
     lesson_count INTEGER;
     track_count INTEGER;
     quiz_lesson_count INTEGER;
+    preferred_order CONSTANT uuid[] := ARRAY[
+        '16ecc3d7-9b51-4309-ba95-54ede97c2d11'::uuid,
+        'd8527f9b-66f7-4e78-a481-a603fdb8b567'::uuid,
+        '8f5197f0-f2d2-46e6-bbb3-f6971414134c'::uuid,
+        'e5b43f83-f2cb-49c2-a036-558c2336d5a7'::uuid,
+        'e0bf6e6b-41b7-40e1-848d-b233bbb358a7'::uuid
+    ];
+    pool_cap CONSTANT int := 9;
+    pref_in_db UUID[];
+    extra_ids UUID[];
     profile_ids UUID[];
     certificate_count INTEGER;
 BEGIN
@@ -255,7 +316,42 @@ BEGIN
     SELECT COUNT(*) INTO track_count FROM public.learning_tracks WHERE status = 'published';
     SELECT COUNT(*) INTO quiz_lesson_count FROM public.lessons WHERE status = 'published' AND lesson_type = 'quiz';
 
-    SELECT ARRAY_AGG(id) INTO profile_ids FROM public.profiles;
+    SELECT COALESCE(
+        ARRAY_AGG(u.pid ORDER BY u.o),
+        ARRAY[]::uuid[]
+    ) INTO pref_in_db
+    FROM unnest(preferred_order) WITH ORDINALITY AS u(pid, o)
+    WHERE EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = u.pid);
+
+    SELECT COALESCE(
+        ARRAY_AGG(x.id ORDER BY x.id),
+        ARRAY[]::uuid[]
+    ) INTO extra_ids
+    FROM (
+        SELECT ranked.id
+        FROM (
+            SELECT pr.id,
+                   ROW_NUMBER() OVER (ORDER BY pr.id) AS rn
+            FROM public.profiles pr
+            WHERE NOT (pr.id = ANY(pref_in_db))
+        ) ranked
+        WHERE ranked.rn <= GREATEST(0, pool_cap - COALESCE(array_length(pref_in_db, 1), 0))
+    ) x;
+
+    profile_ids := pref_in_db || extra_ids;
+
+    IF profile_ids IS NULL OR COALESCE(array_length(profile_ids, 1), 0) = 0 THEN
+        SELECT ARRAY_AGG(id) INTO profile_ids FROM public.profiles;
+        RAISE NOTICE 'Preferred pool empty; using all % profile IDs', COALESCE(array_length(profile_ids, 1), 0);
+    ELSE
+        RAISE NOTICE 'Sampling analytics for % profile(s) (preferred + others, cap %)',
+            COALESCE(array_length(profile_ids, 1), 0),
+            pool_cap;
+    END IF;
+
+    IF profile_ids IS NULL OR COALESCE(array_length(profile_ids, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'No profile IDs available for analytics generation';
+    END IF;
 
     RAISE NOTICE 'Found % users (profiles), % lessons, % tracks, % quiz lessons', user_count, lesson_count, track_count, quiz_lesson_count;
 
@@ -479,7 +575,7 @@ SELECT 'certificates (total): ' || COUNT(*) FROM public.certificates WHERE type 
 
     echo ""
     echo -e "${YELLOW}Note: FK constraints to auth.users were dropped and not recreated.${NC}"
-    echo -e "${YELLOW}      Rows use the ${USER_COUNT} profile IDs in public.profiles for this project.${NC}"
+    echo -e "${YELLOW}      Rows sample user_id from preferred pool (five listed IDs + others to max 9) when present.${NC}"
 done
 
 echo ""
