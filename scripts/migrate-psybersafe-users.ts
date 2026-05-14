@@ -10,6 +10,9 @@
  *
  *   Status      Registration status — columns: First Name, Last Name, Email, Status
  *   Score       Quiz scores        — columns: Fullname, Email, Result
+ *               Duplicate Email rows: classification uses the best score (max Result).
+ *               Optional (exports): DateSubmitted / Date Submitted, SubmissionId — used to
+ *               insert multiple quiz_attempts per user in sheet order / chronological order.
  *   <date>      Learner progress   — columns: Learner, <10 episode cols>, Quiz!, Score
  *               (use the most recent date sheet, e.g. "20251230")
  *
@@ -42,16 +45,17 @@
  *                               absent in both sheets, department assignment is skipped.
  *                               Departments are created automatically if they don't exist.
  *
- *   Env vars are loaded automatically from the nearest .env.local or .env file
- *   (searches deploy/scripts/ then deploy/). You can also pass them inline.
+ *   Env vars are loaded from the first file that exists: `deploy/scripts/.env`,
+ *   then `deploy/.env`. (A symlink `deploy/scripts/.env` → `.env.local` is fine.)
  *
  * ─── Required env vars ───────────────────────────────────────────────────────
  *
  *   SUPABASE_URL              e.g. https://orolrurwgwceaohtpwdc.supabase.co
  *   SUPABASE_SERVICE_ROLE_KEY Service role key (not anon key)
- *   APP_BASE_URL              Learn app base URL for this client instance
- *                             e.g. https://staysecure-learn.raynsecure.com
- *   CLIENT_PATH               Tenant path segment  e.g. /nexus  (empty for dev/staging)
+ *   APP_BASE_URL              Learn app URL for this client, as in org settings / DB — may include
+ *                             the tenant path, e.g. https://staysecure-learn.raynsecure.com/ygos
+ *                             Activation links use APP_BASE_URL + "/activate-account".
+ *                             The Origin header for edge invokes uses only scheme+host (derived).
  *
  * ─── Dependencies (install once in deploy/scripts/) ──────────────────────────
  *
@@ -66,10 +70,11 @@ import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 
 // ---------------------------------------------------------------------------
-// .env loader — searches deploy/scripts/ then deploy/ for .env.local / .env
+// .env loader — first match: deploy/scripts/.env, then deploy/.env
+// (same path can be a symlink, e.g. .env → .env.local)
 // ---------------------------------------------------------------------------
 (function loadEnv() {
-  const parseFile = (file: string, override: boolean) => {
+  const parseFile = (file: string) => {
     if (!fs.existsSync(file)) return false;
     const lines = fs.readFileSync(file, 'utf-8').split('\n');
     for (const line of lines) {
@@ -79,26 +84,13 @@ import * as XLSX from 'xlsx';
       if (eq === -1) continue;
       const key = trimmed.slice(0, eq).trim().replace(/^export\s+/, '');
       const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
-      if (override || !(key in process.env)) process.env[key] = val;
+      process.env[key] = val;
     }
     console.log(`📄 Loaded env from ${file}`);
     return true;
   };
 
-  // .env.local always overrides shell environment (client-specific config)
-  // .env only fills in vars not already set
-  const localLoaded =
-    parseFile(path.resolve(__dirname, '.env.local'), true) ||
-    parseFile(path.resolve(__dirname, '..', '.env.local'), true);
-
-  if (!localLoaded) {
-    parseFile(path.resolve(__dirname, '.env'), false) ||
-    parseFile(path.resolve(__dirname, '..', '.env'), false);
-  } else {
-    // Also load base .env for any vars not in .env.local
-    parseFile(path.resolve(__dirname, '.env'), false) ||
-    parseFile(path.resolve(__dirname, '..', '.env'), false);
-  }
+  parseFile(path.resolve(__dirname, '.env')) || parseFile(path.resolve(__dirname, '..', '.env'));
 })();
 
 // ---------------------------------------------------------------------------
@@ -129,7 +121,8 @@ const EPISODE_COLUMNS = [
   'Go Phish!',
 ];
 
-const QUIZ_PASS_SCORE    = 16;   // 80% of 20
+const QUIZ_TOTAL_QUESTIONS = 20;
+const QUIZ_PASS_SCORE      = 16; // 80% of QUIZ_TOTAL_QUESTIONS
 const CERTIFICATE_NAME   = 'Cybersecurity Foundation';
 const CERTIFICATE_ISSUER = 'RAYN Secure Pte Ltd';
 const CERTIFICATE_TYPE   = 'Quiz Completion';
@@ -150,10 +143,17 @@ interface StatusRow {
 }
 
 interface ScoreRow {
-  Fullname:  string;
-  Email:     string;
-  Result:    number | string;
+  Fullname?: string;
+  Email?: string;
+  Result?: number | string;
   [key: string]: unknown;
+}
+
+/** One row on the Score sheet with a numeric Result (multiple rows per email → multiple attempts). */
+interface ScoreSubmission {
+  correct: number;
+  completedAtIso: string;
+  sortKey: number;
 }
 
 interface ProgressRow {
@@ -243,11 +243,48 @@ function prompt(question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, (ans) => { rl.close(); resolve(ans); }));
 }
 
+/**
+ * APP_BASE_URL as configured (host-only or with tenant path).
+ * Returns canonical app base (no trailing slash), fetch Origin (no path), and clientPath for create-user.
+ */
+function parseLearnAppUrl(raw: string): { appBase: string; origin: string; clientPath: string } | null {
+  const trimmed = (raw || '').trim().replace(/\/$/, '');
+  if (!trimmed) return { appBase: '', origin: '', clientPath: '' };
+  try {
+    const u = new URL(trimmed);
+    if (!/^https?:$/i.test(u.protocol)) return null;
+    const origin = u.origin;
+    let path = u.pathname;
+    if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
+    const clientPath = path === '/' ? '' : path;
+    const appBase = `${origin}${clientPath}`;
+    return { appBase, origin, clientPath };
+  } catch {
+    return null;
+  }
+}
+
 async function preflight(mode: Mode, xlsxPath: string, statusSheet: string, scoreSheet: string, progressSheet: string): Promise<void> {
   const modeLabel =
     mode === 'preview'  ? '📋 PREVIEW — classify only, zero writes' :
     mode === 'dry-run'  ? '🔵 DRY RUN — create users + records, NO emails' :
                           '🚀 MIGRATE — create users + records + send activation emails';
+
+  const supabaseUrl = process.env.SUPABASE_URL || '(not set)';
+  const parsed = parseLearnAppUrl(process.env.APP_BASE_URL || '');
+  const appBaseUrlDisp = !parsed
+    ? '(invalid URL)'
+    : parsed.appBase || (mode === 'preview' ? '(not set — ok for preview only)' : '(not set)');
+  const originNote =
+    parsed && parsed.appBase
+      ? `\n                     Origin (for edge calls): ${parsed.origin}\n                     create-user clientPath: ${parsed.clientPath || '(root)'}`
+      : '';
+
+  let projectRef = '';
+  try {
+    const host = new URL(supabaseUrl.replace(/^\(not set\)$/, 'https://invalid.local')).hostname;
+    projectRef = host.endsWith('.supabase.co') ? host.replace('.supabase.co', '') : '';
+  } catch { /* ignore */ }
 
   console.log(`
 ╔══════════════════════════════════════════════════════════════════╗
@@ -259,6 +296,10 @@ async function preflight(mode: Mode, xlsxPath: string, statusSheet: string, scor
   Status sheet:     ${statusSheet}
   Score sheet:      ${scoreSheet}
   Progress sheet:   ${progressSheet}
+
+  ── Target environment (verify this matches the client you intend) ──
+  SUPABASE_URL       ${supabaseUrl}${projectRef ? `\n                     (project ref: ${projectRef})` : ''}
+  APP_BASE_URL       ${appBaseUrlDisp}${originNote}
 
 Before continuing, confirm the following for this client instance:
 
@@ -272,8 +313,7 @@ Before continuing, confirm the following for this client instance:
 
   3. EPISODE_COLUMNS match the column headers in the progress sheet.
 
-  4. SUPABASE_URL, APP_BASE_URL, and CLIENT_PATH env vars point to
-     the correct client instance.
+  4. SUPABASE_URL and APP_BASE_URL (shown above) point to the correct client instance.
 `);
 
   const answer = await prompt('Ready to go? (y/N): ');
@@ -292,8 +332,10 @@ async function createUser(
   supabase: any,
   serviceRoleKey: string,
   user: { email: string; fullName: string; firstName: string; lastName: string },
+  /** Path segment for tenant, e.g. /ygos — from APP_BASE_URL */
   clientPath: string,
-  appBaseUrl: string,
+  /** Scheme + host only — for Origin header */
+  origin: string,
 ): Promise<string | null | 'already_exists'> {
   try {
     const { data, error } = await supabase.functions.invoke('create-user', {
@@ -310,7 +352,7 @@ async function createUser(
       },
       headers: {
         Authorization: `Bearer ${serviceRoleKey}`,
-        Origin:        appBaseUrl,
+        Origin:        origin,
       },
     });
 
@@ -344,15 +386,16 @@ async function sendActivationEmail(
   supabase: any,
   serviceRoleKey: string,
   email: string,
-  appBaseUrl: string,
-  clientPath: string,
+  /** Full app URL including tenant path; no trailing slash */
+  appBase: string,
+  origin: string,
 ): Promise<void> {
-  const redirectUrl = `${appBaseUrl}${clientPath}/activate-account`;
+  const redirectUrl = `${appBase}/activate-account`;
   const { error } = await supabase.functions.invoke('request-activation-link', {
     body: { email, redirectUrl },
     headers: {
       Authorization: `Bearer ${serviceRoleKey}`,
-      Origin:        appBaseUrl,
+      Origin:        origin,
     },
   });
   if (error) throw new Error(`request-activation-link: ${error.message}`);
@@ -391,17 +434,60 @@ async function main() {
 
   const supabaseUrl    = process.env.SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const appBaseUrl     = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
-  const clientPath     = process.env.CLIENT_PATH || '';
+  const parsedApp      = parseLearnAppUrl(process.env.APP_BASE_URL || '');
+  const appBase        = parsedApp?.appBase ?? '';
+  const origin         = parsedApp?.origin ?? '';
+  const clientPath     = parsedApp?.clientPath ?? '';
 
   if (!supabaseUrl || !serviceRoleKey) {
     console.error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
     process.exit(1);
   }
-  if (mode !== 'preview' && !appBaseUrl) {
-    console.error('Set APP_BASE_URL environment variable (e.g. https://staysecure-learn.raynsecure.com).');
+  if (mode !== 'preview') {
+    if (!parsedApp || !appBase) {
+      console.error(
+        'Set APP_BASE_URL to the Learn URL for this client (may include tenant path), e.g.\n' +
+          '  https://staysecure-learn.raynsecure.com/ygos',
+      );
+      process.exit(1);
+    }
+  }
+
+  const resolvedXlsx = path.resolve(xlsxPath);
+  console.log(`📂 Validating workbook: ${resolvedXlsx}`);
+  if (!fs.existsSync(resolvedXlsx)) {
+    console.error(`   ✗ Workbook does not exist:\n      ${resolvedXlsx}`);
     process.exit(1);
   }
+
+  const stat = fs.statSync(resolvedXlsx);
+  if (!stat.isFile()) {
+    console.error(`   ✗ Path is not a file:\n      ${resolvedXlsx}`);
+    process.exit(1);
+  }
+
+  let wb: ReturnType<typeof XLSX.readFile>;
+  try {
+    wb = XLSX.readFile(resolvedXlsx);
+  } catch (err) {
+    console.error(`   ✗ Could not read file: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+
+  const requiredSheets = [
+    { name: statusSheet, label: 'status' },
+    { name: scoreSheet, label: 'score' },
+    { name: progressSheet, label: 'progress' },
+  ];
+  const missingSheets = requiredSheets.filter((s) => !wb.SheetNames.includes(s.name));
+  if (missingSheets.length > 0) {
+    console.error('   ✗ Missing required sheet(s):');
+    for (const s of missingSheets) console.error(`      • "${s.name}" (${s.label})`);
+    console.error(`\n   Sheets present: ${wb.SheetNames.join(', ')}`);
+    process.exit(1);
+  }
+
+  console.log(`   ✓ ${wb.SheetNames.length} sheet(s); "${statusSheet}", "${scoreSheet}", "${progressSheet}" OK\n`);
 
   await preflight(mode, xlsxPath, statusSheet, scoreSheet, progressSheet);
 
@@ -409,11 +495,7 @@ async function main() {
     auth: { persistSession: false },
   });
 
-  // ── Load workbook ─────────────────────────────────────────────────────────
-  console.log(`📂 Loading workbook: ${xlsxPath}`);
-  const wb = XLSX.readFile(path.resolve(xlsxPath));
-  console.log(`   Sheets found: ${wb.SheetNames.join(', ')}`);
-
+  // ── Parse sheets (workbook already loaded & validated) ───────────────────
   const statusRows   = readSheet<StatusRow>(wb, statusSheet);
   const scoreRows    = readSheet<ScoreRow>(wb, scoreSheet);
   const progressRows = readSheet<ProgressRow>(wb, progressSheet);
@@ -426,15 +508,59 @@ async function main() {
 
   // Score sheet: Fullname (lowercase) → email  (name→email bridge)
   const nameToEmail = new Map<string, string>();
-  // Score sheet: email (lowercase) → quiz Result
-  const emailToQuizScore = new Map<string, number | null>();
+  // Score sheet: email (lowercase) → best quiz Result (max) for classification only
+  const emailToQuizScore = new Map<string, number>();
+  // Every scored Score row → quiz_attempts later (multiple rows per email kept)
+  const submissionsByEmail = new Map<string, ScoreSubmission[]>();
+  let scoreSheetRowNum = 0;
   for (const row of scoreRows) {
+    scoreSheetRowNum++;
     if (!row.Email) continue;
     const email = String(row.Email).toLowerCase().trim();
-    const name  = String(row.Fullname || '').toLowerCase().trim();
-    if (name)  nameToEmail.set(name, email);
-    emailToQuizScore.set(email, parseScore(row.Result));
+    const name = String(row.Fullname || '').toLowerCase().trim();
+    if (name) nameToEmail.set(name, email);
+
+    const s = parseScore(row.Result);
+    if (s === null) continue;
+
+    const prev = emailToQuizScore.get(email);
+    if (prev === undefined || s > prev) emailToQuizScore.set(email, s);
+
+    const correct = Math.max(0, Math.min(QUIZ_TOTAL_QUESTIONS, Math.round(s)));
+    const r = row as Record<string, unknown>;
+    let completedAtIso = new Date().toISOString();
+    const dateRaw = r['DateSubmitted'] ?? r['Date Submitted'];
+    if (dateRaw !== undefined && dateRaw !== null && String(dateRaw).trim() !== '') {
+      const d =
+        dateRaw instanceof Date
+          ? dateRaw
+          : new Date(String(dateRaw));
+      if (!Number.isNaN(d.getTime())) completedAtIso = d.toISOString();
+    }
+
+    let sortKey = scoreSheetRowNum;
+    const sidRaw = r['SubmissionId'] ?? r['Submission Id'];
+    if (sidRaw !== undefined && sidRaw !== null && String(sidRaw).trim() !== '') {
+      const n = typeof sidRaw === 'number' ? sidRaw : parseInt(String(sidRaw), 10);
+      if (!Number.isNaN(n)) sortKey = n;
+    }
+
+    if (!submissionsByEmail.has(email)) submissionsByEmail.set(email, []);
+    submissionsByEmail.get(email)!.push({ correct, completedAtIso, sortKey });
   }
+
+  submissionsByEmail.forEach((arr) => {
+    arr.sort((a, b) => {
+      const ta = new Date(a.completedAtIso).getTime();
+      const tb = new Date(b.completedAtIso).getTime();
+      if (ta !== tb) return ta - tb;
+      return a.sortKey - b.sortKey;
+    });
+  });
+  let scoreSubmissionRows = 0;
+  submissionsByEmail.forEach((arr) => {
+    scoreSubmissionRows += arr.length;
+  });
 
   // Progress sheet: learner name (lowercase) → row
   const progressByName = new Map<string, ProgressRow>();
@@ -530,6 +656,36 @@ async function main() {
     console.warn('   ⚠️  No lessons found in Foundation track — run SyncManager before migrating users.');
   }
 
+  const foundationLessonRows = (foundationLessons ?? []) as Array<{ lesson_id: string; order_index: number }>;
+  let capstoneQuizLessonId: string | null = null;
+  if (foundationLessonRows.length > 0) {
+    capstoneQuizLessonId = await resolveFoundationCapstoneQuizLessonId(supabase, foundationLessonRows);
+  }
+
+  let quizAttemptsForStatusUsers = 0;
+  let statusUsersWithScoreAttempts = 0;
+  for (const m of migrations) {
+    const subs = submissionsByEmail.get(m.email);
+    if (!subs?.length) continue;
+    statusUsersWithScoreAttempts++;
+    quizAttemptsForStatusUsers += subs.length;
+  }
+
+  console.log('\n📊 Quiz attempts (Score sheet → quiz_attempts):');
+  console.log(`   Rows with numeric Result: ${scoreSubmissionRows}`);
+  console.log(
+    `   Would write for this run (${migrations.length} Status users): ${quizAttemptsForStatusUsers} attempt(s) across ${statusUsersWithScoreAttempts} user(s)`,
+  );
+  const scoreRowsOutsideMigration = scoreSubmissionRows - quizAttemptsForStatusUsers;
+  if (scoreRowsOutsideMigration > 0) {
+    console.log(`   ${scoreRowsOutsideMigration} score row(s) skipped — email not on Status sheet`);
+  }
+  if (scoreSubmissionRows > 0 && !capstoneQuizLessonId) {
+    console.warn(
+      '   ⚠️  No Foundation capstone quiz lesson — quiz_attempts will not be written until the track has a quiz lesson.',
+    );
+  }
+
   if (mode === 'preview') {
     console.log('\n✅ Preview complete. Run with --dry-run to create users and write records.');
     return;
@@ -555,6 +711,7 @@ async function main() {
 
   const now = new Date().toISOString();
   let created = 0, alreadyExisted = 0, recordsWritten = 0, emailsSent = 0;
+  let quizAttemptsInserted = 0;
   let createErrors = 0, recordErrors = 0, emailErrors = 0;
 
   const cohortCounters: Record<Cohort, number> = { E1: 0, E2: 0, E3: 0 };
@@ -575,7 +732,7 @@ async function main() {
     cohortCounters[m.cohort]++;
     const tag = `${m.cohort} ${String(cohortCounters[m.cohort]).padStart(2)}/${counts[m.cohort]}`;
 
-    const result = await createUser(supabase, serviceRoleKey!, m, clientPath, appBaseUrl);
+    const result = await createUser(supabase, serviceRoleKey!, m, clientPath, origin);
 
     let userId: string | undefined;
 
@@ -615,6 +772,14 @@ async function main() {
       }
       recordsWritten++;
 
+      quizAttemptsInserted += await replaceQuizAttemptsFromScoreSheet(
+        supabase,
+        userId,
+        m.email,
+        submissionsByEmail,
+        capstoneQuizLessonId,
+      );
+
       // Assign department if a business line was mapped
       let deptNote = '';
       if (departmentMap.size > 0) {
@@ -648,7 +813,7 @@ async function main() {
 
     if (mode === 'migrate') {
       try {
-        await sendActivationEmail(supabase, serviceRoleKey!, m.email, appBaseUrl, clientPath);
+        await sendActivationEmail(supabase, serviceRoleKey!, m.email, appBase, origin);
         emailsSent++;
       } catch (err) {
         emailErrors++;
@@ -663,6 +828,7 @@ async function main() {
   console.log(`   Users created:         ${created}`);
   console.log(`   Users already existed: ${alreadyExisted}`);
   console.log(`   Records written:       ${recordsWritten}`);
+  console.log(`   Quiz attempts written: ${quizAttemptsInserted}`);
   if (mode === 'migrate') {
     console.log(`   Activation emails:     ${emailsSent}`);
     if (emailErrors > 0) console.warn(`   Email errors:          ${emailErrors}`);
@@ -672,6 +838,67 @@ async function main() {
   }
   if (createErrors > 0) console.warn(`   User creation errors:  ${createErrors}`);
   if (recordErrors > 0) console.warn(`   Record errors:         ${recordErrors}`);
+}
+
+/**
+ * Highest-order quiz lesson on the Foundation track (e.g. Go Phish capstone).
+ */
+async function resolveFoundationCapstoneQuizLessonId(
+  supabase: any,
+  foundationLessonRows: Array<{ lesson_id: string; order_index: number }>,
+): Promise<string | null> {
+  if (foundationLessonRows.length === 0) return null;
+  const ids = [...new Set(foundationLessonRows.map((r) => r.lesson_id))];
+  const { data: lessons, error } = await supabase.from('lessons').select('id, lesson_type').in('id', ids);
+  if (error) {
+    console.warn(`   ⚠️  Could not load lesson types for capstone resolution: ${error.message}`);
+    return null;
+  }
+  const orderByLesson = new Map(foundationLessonRows.map((r) => [r.lesson_id, r.order_index]));
+  let best: { lesson_id: string; order_index: number } | null = null;
+  for (const row of lessons ?? []) {
+    if (row.lesson_type !== 'quiz') continue;
+    const oid = orderByLesson.get(row.id as string);
+    if (oid === undefined) continue;
+    if (!best || oid > best.order_index) best = { lesson_id: row.id as string, order_index: oid };
+  }
+  return best?.lesson_id ?? null;
+}
+
+/** Replace capstone quiz_attempts from Score sheet rows for this email (chronological). */
+async function replaceQuizAttemptsFromScoreSheet(
+  supabase: any,
+  userId: string,
+  emailLower: string,
+  submissionsByEmail: Map<string, ScoreSubmission[]>,
+  capstoneLessonId: string | null,
+): Promise<number> {
+  if (!capstoneLessonId) return 0;
+  const subs = submissionsByEmail.get(emailLower.toLowerCase().trim());
+  if (!subs?.length) return 0;
+
+  const { error: delErr } = await supabase
+    .from('quiz_attempts')
+    .delete()
+    .eq('user_id', userId)
+    .eq('lesson_id', capstoneLessonId);
+  if (delErr) throw new Error(`quiz_attempts delete: ${delErr.message}`);
+
+  const rows = subs.map((s, i) => ({
+    user_id: userId,
+    lesson_id: capstoneLessonId,
+    attempt_number: i + 1,
+    total_questions: QUIZ_TOTAL_QUESTIONS,
+    correct_answers: s.correct,
+    percentage_score: (s.correct / QUIZ_TOTAL_QUESTIONS) * 100,
+    passed: s.correct >= QUIZ_PASS_SCORE,
+    completed_at: s.completedAtIso,
+    answers_data: [],
+  }));
+
+  const { error: insErr } = await supabase.from('quiz_attempts').insert(rows);
+  if (insErr) throw new Error(`quiz_attempts insert: ${insErr.message}`);
+  return rows.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,12 +974,19 @@ async function writeE3(
 // ---------------------------------------------------------------------------
 
 async function assignDepartment(supabase: any, userId: string, departmentId: string, now: string) {
-  const { error } = await supabase
-    .from('user_departments')
-    .upsert(
-      { user_id: userId, department_id: departmentId, assigned_at: now, is_primary: true },
-      { onConflict: 'user_id,department_id', ignoreDuplicates: true },
-    );
+  // Matches unique_user_department_pairing on (user_id, department_id, pairing_id) — see
+  // learn/supabase/migrations/20260510100000_fix_user_departments_unique_constraint.sql
+  // Migration rows are standalone (no paired role): pairing_id must be null in the upsert key.
+  const { error } = await supabase.from('user_departments').upsert(
+    {
+      user_id: userId,
+      department_id: departmentId,
+      pairing_id: null,
+      assigned_at: now,
+      is_primary: true,
+    },
+    { onConflict: 'user_id,department_id,pairing_id', ignoreDuplicates: true },
+  );
   if (error) throw new Error(`department assignment: ${error.message}`);
 }
 

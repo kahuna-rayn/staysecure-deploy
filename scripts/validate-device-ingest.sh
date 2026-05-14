@@ -3,11 +3,18 @@
 # or more Supabase projects.
 #
 # Checks:
-#   1. All 5 device-ingest migrations are recorded in schema_migrations
-#   2. hardware_inventory has all 13 new columns
-#   3. org_profile has all 6 new columns
+#   1. (Informational by default) device-ingest rows in supabase_migrations.schema_migrations
+#   2. hardware_inventory has all expected device-ingest columns
+#   3. org_profile has all expected integration columns
 #   4. public.get_vault_secret() and public.upsert_vault_secret() RPCs exist
 #   5. device-sync-nightly cron job is registered
+#
+# Migration ledger (1) does not fail the script by default — restores/dumps often
+# lack those rows even when DDL matches. Use --strict-migrations to fail on missing
+# migration history (e.g. CI).
+#
+# Checks (2)–(5) are always blocking: missing hardware_inventory / org_profile
+# columns, Vault RPCs, or cron will fail the run.
 #
 # Usage:
 #   ./validate-device-ingest.sh --dev
@@ -16,8 +23,10 @@
 #   ./validate-device-ingest.sh --all-production
 #   ./validate-device-ingest.sh --all
 #   ./validate-device-ingest.sh <project-ref>
+#   ./validate-device-ingest.sh --strict-migrations --dev
 #
-# PGPASSWORD must be set in the environment (or in deploy/.env.local).
+# Targets and projects.conf resolution match run-migrations.sh.
+# PGPASSWORD must be set (export or deploy/.env.local).
 
 set -euo pipefail
 
@@ -31,8 +40,9 @@ NC='\033[0m'
 
 PASS="${GREEN}✓${NC}"
 FAIL="${RED}✗${NC}"
+WARN="${YELLOW}⚠${NC}"
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Paths (same as run-migrations.sh) ─────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROJECTS_CONF="${PROJECT_ROOT}/learn/secrets/projects.conf"
@@ -44,10 +54,12 @@ if [ ! -f "${PROJECTS_CONF}" ]; then
 fi
 source "${PROJECTS_CONF}"
 
-# ── PGPASSWORD guard ──────────────────────────────────────────────────────────
-if [ -f "${SCRIPT_DIR}/../.env.local" ]; then
+# ── Optional: load PGPASSWORD from deploy env files (run-migrations uses export only)
+if [ -z "${PGPASSWORD:-}" ] && [ -f "${SCRIPT_DIR}/../.env.local" ]; then
+    # shellcheck source=/dev/null
     source "${SCRIPT_DIR}/../.env.local"
-elif [ -f "${SCRIPT_DIR}/../.env" ]; then
+elif [ -z "${PGPASSWORD:-}" ] && [ -f "${SCRIPT_DIR}/../.env" ]; then
+    # shellcheck source=/dev/null
     source "${SCRIPT_DIR}/../.env"
 fi
 
@@ -57,11 +69,11 @@ if [ -z "${PGPASSWORD:-}" ]; then
     exit 1
 fi
 
-# ── Args ──────────────────────────────────────────────────────────────────────
+# ── Args (aligned with run-migrations.sh targets) ─────────────────────────────
 if [ $# -eq 0 ]; then
     echo -e "${RED}Error: at least one target is required${NC}"
     echo ""
-    echo "Usage: $0 <target> [target2] ..."
+    echo "Usage: $0 [--strict-migrations] <target> [target2] ..."
     echo ""
     echo "Targets:"
     echo "  --dev                  Dev project (${DEV_REF})"
@@ -70,15 +82,30 @@ if [ $# -eq 0 ]; then
     echo "  --all-production       All production client projects"
     echo "  --all                  Dev + staging + master + all production"
     echo "  <project-ref>          Any raw Supabase project ref"
+    echo ""
+    echo "Options:"
+    echo "  --strict-migrations    Fail if device-ingest rows are missing from"
+    echo "                         supabase_migrations.schema_migrations (default: warn only)"
     exit 1
 fi
 
+STRICT_MIGRATIONS=false
 REFS=()
+
 for arg in "$@"; do
     case "$arg" in
-        --dev)            REFS+=("$DEV_REF") ;;
-        --staging)        REFS+=("$STAGING_REF") ;;
-        --master)         REFS+=("$MASTER_REF") ;;
+        --strict-migrations)
+            STRICT_MIGRATIONS=true
+            ;;
+        --dev)
+            REFS+=("$DEV_REF")
+            ;;
+        --staging)
+            REFS+=("$STAGING_REF")
+            ;;
+        --master)
+            REFS+=("$MASTER_REF")
+            ;;
         --all-production)
             if [ ${#PRODUCTION_CLIENT_REFS[@]} -eq 0 ]; then
                 echo -e "${YELLOW}No production client refs configured in projects.conf${NC}"
@@ -88,29 +115,44 @@ for arg in "$@"; do
             ;;
         --all)
             REFS+=("$DEV_REF" "$STAGING_REF" "$MASTER_REF")
-            [ ${#PRODUCTION_CLIENT_REFS[@]} -gt 0 ] && REFS+=("${PRODUCTION_CLIENT_REFS[@]}")
+            if [ ${#PRODUCTION_CLIENT_REFS[@]} -gt 0 ]; then
+                REFS+=("${PRODUCTION_CLIENT_REFS[@]}")
+            fi
             ;;
         --*)
-            echo -e "${RED}Unknown flag: $arg${NC}"; exit 1 ;;
+            # Dynamic lookup: --foo → FOO_REF, --foo-bar → FOO_BAR_REF
+            var_name="$(echo "${arg#--}" | tr '[:lower:]-' '[:upper:]_')_REF"
+            ref="${!var_name}"
+            if [ -n "$ref" ]; then
+                REFS+=("$ref")
+            else
+                echo -e "${RED}Unknown flag: $arg (no ${var_name} defined in projects.conf)${NC}" >&2
+                exit 1
+            fi
+            ;;
         *)
-            REFS+=("$arg") ;;
+            REFS+=("$arg")
+            ;;
     esac
 done
 
-# Deduplicate
+if [ ${#REFS[@]} -eq 0 ]; then
+    echo -e "${RED}Error: no project refs resolved from the given targets${NC}"
+    exit 1
+fi
+
+# Deduplicate refs (preserving order, bash 3 compatible — same as run-migrations.sh)
 UNIQUE_REFS=()
 for ref in "${REFS[@]}"; do
     _dup=false
-    for _e in "${UNIQUE_REFS[@]:-}"; do [ "$_e" = "$ref" ] && _dup=true && break; done
+    for _existing in "${UNIQUE_REFS[@]:-}"; do
+        [ "$_existing" = "$ref" ] && _dup=true && break
+    done
     $_dup || UNIQUE_REFS+=("$ref")
 done
 
-if [ ${#UNIQUE_REFS[@]} -eq 0 ]; then
-    echo -e "${RED}Error: no project refs resolved${NC}"; exit 1
-fi
-
-# ── Connection helper (mirrors run-migrations.sh) ─────────────────────────────
-conn_for_ref() {
+# ── Connection helper (same logic as run-migrations.sh connect_args_for_ref) ──
+connect_args_for_ref() {
     local ref="$1"
     local db_host="db.${ref}.supabase.co"
     local pooler_host="${POOLER_HOST:-aws-1-${REGION}.pooler.supabase.com}"
@@ -167,6 +209,11 @@ echo ""
 echo -e "${CYAN}${BOLD}════════════════════════════════════════════════════════════${NC}"
 echo -e "${CYAN}${BOLD}  validate-device-ingest.sh${NC}"
 echo -e "${CYAN}${BOLD}════════════════════════════════════════════════════════════${NC}"
+if $STRICT_MIGRATIONS; then
+    echo -e "  ${BOLD}strict-migrations:${NC} on (missing ledger rows will fail the run)"
+else
+    echo -e "  ${BOLD}strict-migrations:${NC} off (migration ledger is informational only)"
+fi
 echo -e "  Checking ${#UNIQUE_REFS[@]} project(s)"
 for ref in "${UNIQUE_REFS[@]}"; do echo -e "    • ${ref}"; done
 echo ""
@@ -181,23 +228,30 @@ for PROJECT_REF in "${UNIQUE_REFS[@]}"; do
     echo -e "${CYAN}${BOLD}${DISPLAY}${NC}"
     echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
 
-    CONN=$(conn_for_ref "${PROJECT_REF}")
+    CONN=$(connect_args_for_ref "${PROJECT_REF}")
     project_failures=0
 
-    # ── 1. Migration records ─────────────────────────────────────────────────
-    echo -e "\n  ${BOLD}Migrations (schema_migrations)${NC}"
+    # ── 1. Migration records (non-fatal unless --strict-migrations) ───────────
+    echo -e "\n  ${BOLD}Migrations (supabase_migrations.schema_migrations)${NC}"
+    if ! $STRICT_MIGRATIONS; then
+        echo -e "  ${YELLOW}(warnings only — use --strict-migrations to fail on missing rows)${NC}"
+    fi
     for version in "${EXPECTED_MIGRATIONS[@]}"; do
         result=$(query "${CONN}" \
             "SELECT COUNT(*) FROM supabase_migrations.schema_migrations WHERE version = '${version}';")
         if [ "${result}" = "1" ]; then
             echo -e "  ${PASS} ${version}"
         else
-            echo -e "  ${FAIL} ${version} — ${RED}NOT FOUND${NC}"
-            project_failures=$((project_failures + 1))
+            if $STRICT_MIGRATIONS; then
+                echo -e "  ${FAIL} ${version} — ${RED}NOT FOUND${NC}"
+                project_failures=$((project_failures + 1))
+            else
+                echo -e "  ${WARN} ${version} — ${YELLOW}NOT FOUND (ignored)${NC}"
+            fi
         fi
     done
 
-    # ── 2. hardware_inventory columns ────────────────────────────────────────
+    # ── 2. hardware_inventory columns ─────────────────────────────────────────
     echo -e "\n  ${BOLD}hardware_inventory columns${NC}"
     for col in "${EXPECTED_HW_COLUMNS[@]}"; do
         result=$(query "${CONN}" \
@@ -244,7 +298,7 @@ for PROJECT_REF in "${UNIQUE_REFS[@]}"; do
         fi
     done
 
-    # ── 5. Cron job ──────────────────────────────────────────────────────────
+    # ── 5. Cron job ───────────────────────────────────────────────────────────
     echo -e "\n  ${BOLD}Cron job${NC}"
     cron_result=$(query "${CONN}" \
         "SELECT schedule FROM cron.job WHERE jobname = 'device-sync-nightly';")
@@ -259,15 +313,15 @@ for PROJECT_REF in "${UNIQUE_REFS[@]}"; do
     # ── Project result ───────────────────────────────────────────────────────
     echo ""
     if [ "${project_failures}" -eq 0 ]; then
-        echo -e "  ${GREEN}${BOLD}All checks passed${NC}"
+        echo -e "  ${GREEN}${BOLD}All blocking checks passed${NC}"
         PASSED+=("${DISPLAY}")
     else
-        echo -e "  ${RED}${BOLD}${project_failures} check(s) failed${NC}"
+        echo -e "  ${RED}${BOLD}${project_failures} blocking check(s) failed${NC}"
         FAILED+=("${DISPLAY}")
     fi
 done
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}${BOLD}════════════════════════════════════════════════════════════${NC}"
 echo -e "${CYAN}${BOLD}  Summary${NC}"
@@ -287,3 +341,4 @@ if [ ${#FAILED[@]} -gt 0 ]; then
 fi
 
 echo ""
+exit 0

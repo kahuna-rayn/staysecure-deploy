@@ -14,6 +14,10 @@
 #
 # The onboard-client.sh script will automatically load .env.local or .env if present
 # Both .env.local and .env are in .gitignore and will NOT be committed
+#
+# Optional: PROJECT_REF in .env.local makes onboard-client.sh skip project creation and
+# target that project (resume). Remove it (or use ./onboard-client.sh --new ...) for a
+# brand-new Supabase project; a stale ref causes pooler errors after the project is deleted.
 
 # Database Configuration
 # Database password set during Supabase project creation
@@ -49,6 +53,10 @@ export GOOGLE_TRANSLATE_API_KEY="<your-google-translate-api-key>"
 # DeepL API Key
 # Get from: DeepL API Dashboard
 export DEEPL_API_KEY="<your-deepl-api-key>"
+
+# PhishingBox API token (same value provisioned to every client project's Edge Function secrets
+# for phishingbox-sync; set once in this file and onboard-client.sh pushes it per client)
+export PHISHINGBOX_API_TOKEN="<your-phishingbox-api-token>"
 
 # Lambda Configuration (used by Supabase Edge Functions to send emails)
 # Note: AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, SES_FROM_EMAIL) 

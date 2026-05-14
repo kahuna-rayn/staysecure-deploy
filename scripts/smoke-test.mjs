@@ -87,8 +87,8 @@ async function post(url, headers, payload) {
 // ── Config ───────────────────────────────────────────────────────────────────
 
 const arg = process.argv[2];
-if (!arg || ![`--dev`, `--staging`].includes(arg) && !arg.match(/^[a-z]{20}$/)) {
-  console.error('Usage: node scripts/smoke-test.mjs <--dev|--staging|project-ref>');
+if (!arg || ![`--dev`, `--staging`, `--omnihealth`, `--nexus`, `--ygos`, `--renci`].includes(arg) && !arg.match(/^[a-z]{20}$/)) {
+  console.error('Usage: node scripts/smoke-test.mjs <--dev|--staging|--omnihealth|--nexus|--ygos|--renci|project-ref>');
   process.exit(1);
 }
 
@@ -112,6 +112,18 @@ if (arg === '--dev') {
 } else if (arg === '--staging') {
   projectRef = readProjectRef('STAGING_REF');
   envFile = join(SECRETS_DIR, 'staging-secrets.env');
+} else if (arg === '--omnihealth') {
+  projectRef = readProjectRef('OMNIHEALTH_REF');
+  envFile = join(SECRETS_DIR, 'omnihealth-secrets.env');
+} else if (arg === '--nexus') {
+  projectRef = readProjectRef('NEXUS_REF');
+  envFile = join(SECRETS_DIR, 'nexus-secrets.env');
+} else if (arg === '--ygos') {
+  projectRef = readProjectRef('YGOS_REF');
+  envFile = join(SECRETS_DIR, 'ygos-secrets.env');
+} else if (arg === '--renci') {
+  projectRef = readProjectRef('RENCI_REF');
+  envFile = join(SECRETS_DIR, 'renci-secrets.env');
 } else {
   projectRef = arg;
   envFile = join(SECRETS_DIR, 'dev-secrets.env');

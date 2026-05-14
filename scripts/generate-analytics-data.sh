@@ -316,12 +316,14 @@ BEGIN
     SELECT COUNT(*) INTO track_count FROM public.learning_tracks WHERE status = 'published';
     SELECT COUNT(*) INTO quiz_lesson_count FROM public.lessons WHERE status = 'published' AND lesson_type = 'quiz';
 
+    -- Exclude super_admin users so generated data does not get filtered from reports
     SELECT COALESCE(
         ARRAY_AGG(u.pid ORDER BY u.o),
         ARRAY[]::uuid[]
     ) INTO pref_in_db
     FROM unnest(preferred_order) WITH ORDINALITY AS u(pid, o)
-    WHERE EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = u.pid);
+    WHERE EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = u.pid)
+      AND NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = u.pid AND ur.role = 'super_admin');
 
     SELECT COALESCE(
         ARRAY_AGG(x.id ORDER BY x.id),
@@ -334,6 +336,7 @@ BEGIN
                    ROW_NUMBER() OVER (ORDER BY pr.id) AS rn
             FROM public.profiles pr
             WHERE NOT (pr.id = ANY(pref_in_db))
+              AND NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = pr.id AND ur.role = 'super_admin')
         ) ranked
         WHERE ranked.rn <= GREATEST(0, pool_cap - COALESCE(array_length(pref_in_db, 1), 0))
     ) x;
@@ -341,8 +344,10 @@ BEGIN
     profile_ids := pref_in_db || extra_ids;
 
     IF profile_ids IS NULL OR COALESCE(array_length(profile_ids, 1), 0) = 0 THEN
-        SELECT ARRAY_AGG(id) INTO profile_ids FROM public.profiles;
-        RAISE NOTICE 'Preferred pool empty; using all % profile IDs', COALESCE(array_length(profile_ids, 1), 0);
+        SELECT ARRAY_AGG(id) INTO profile_ids
+        FROM public.profiles pr
+        WHERE NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = pr.id AND ur.role = 'super_admin');
+        RAISE NOTICE 'Preferred pool empty; using all non-super-admin profile IDs: %', COALESCE(array_length(profile_ids, 1), 0);
     ELSE
         RAISE NOTICE 'Sampling analytics for % profile(s) (preferred + others, cap %)',
             COALESCE(array_length(profile_ids, 1), 0),

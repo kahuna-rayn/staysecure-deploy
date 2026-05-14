@@ -79,18 +79,19 @@ WITH CHECK (
 );
 
 -- ── documents bucket ─────────────────────────────────────────────────────────
+-- Uses can_manage_documents() (SECURITY DEFINER, defined in migration
+-- 20260427000000_can_manage_documents.sql) to allow super_admin, client_admin,
+-- and managers to upload/delete. The old inline user_roles policy is dropped to
+-- prevent a duplicate that caused TCP timeouts in the storage RLS context.
 
-DROP POLICY IF EXISTS "Admins can manage document files" ON storage.objects;
-CREATE POLICY "Admins can manage document files"
+DROP POLICY IF EXISTS "Admins can manage document files"               ON storage.objects;
+DROP POLICY IF EXISTS "Managers can manage document files"             ON storage.objects;
+DROP POLICY IF EXISTS "Admins and managers can manage document files"  ON storage.objects;
+
+CREATE POLICY "Admins and managers can manage document files"
 ON storage.objects FOR ALL TO authenticated
-USING (
-  bucket_id = 'documents'
-  AND EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = auth.uid() AND role IN ('super_admin', 'client_admin'))
-)
-WITH CHECK (
-  bucket_id = 'documents'
-  AND EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = auth.uid() AND role IN ('super_admin', 'client_admin'))
-);
+USING  (bucket_id = 'documents' AND public.can_manage_documents())
+WITH CHECK (bucket_id = 'documents' AND public.can_manage_documents());
 
 -- ── certificates bucket ───────────────────────────────────────────────────────
 

@@ -212,12 +212,27 @@ if [ -n "$MISSING_TABLES" ]; then
     echo -e "${YELLOW}Attempting to restore data anyway...${NC}"
 fi
 
-# Enable required extensions (pgcrypto is needed for generate_content_hash function)
-echo -e "${GREEN}Enabling required PostgreSQL extensions...${NC}"
-psql "${TEMP_CONNECTION}" \
-    --command "CREATE EXTENSION IF NOT EXISTS pgcrypto;" 2>&1 || {
-    echo -e "${YELLOW}Warning: Failed to enable pgcrypto extension (may already exist)${NC}"
+# Supabase stores pgcrypto under schema "extensions"; generate_content_hash() uses
+# extensions.digest(). A fresh TEMP_DB has no "extensions" schema — CREATE EXTENSION
+# pgcrypto alone is not enough (and may install into public). Match production layout:
+require_extensions_schema() {
+    psql "${TEMP_CONNECTION}" -v ON_ERROR_STOP=1 <<'EOSQL'
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+EOSQL
 }
+
+# Enable required extensions (pgcrypto in extensions — needed for generate_content_hash)
+echo -e "${GREEN}Enabling required PostgreSQL extensions...${NC}"
+require_extensions_schema || {
+    echo -e "${RED}Error: Could not create schema extensions or install pgcrypto in temp DB ${TEMP_DB}.${NC}"
+    exit 1
+}
+EXTENSION_OK=$(psql "${TEMP_CONNECTION}" -tAc "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'extensions') AND EXISTS (SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pgcrypto' AND n.nspname = 'extensions');" 2>/dev/null || echo "f")
+if [ "$EXTENSION_OK" != "t" ]; then
+    echo -e "${YELLOW}Warning: pgcrypto in schema extensions not confirmed; retrying...${NC}"
+    require_extensions_schema || exit 1
+fi
 
 # Verify critical functions exist after schema restore
 echo -e "${GREEN}Verifying critical functions exist...${NC}"
@@ -239,21 +254,13 @@ psql "${TEMP_CONNECTION}" \
 FUNCTION_TEST=$(psql "${TEMP_CONNECTION}" -tAc "SELECT public.generate_content_hash('test', 'test');" 2>/dev/null || echo "ERROR")
 if [[ "$FUNCTION_TEST" == "ERROR" ]] || [ -z "$FUNCTION_TEST" ]; then
     echo -e "${RED}Error: generate_content_hash function is not callable${NC}"
-    echo -e "${YELLOW}Checking if pgcrypto extension is enabled...${NC}"
-    EXTENSION_EXISTS=$(psql "${TEMP_CONNECTION}" -tAc "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pgcrypto');" 2>/dev/null || echo "f")
-    if [ "$EXTENSION_EXISTS" != "t" ]; then
-        echo -e "${RED}pgcrypto extension is not enabled - attempting to enable...${NC}"
-        psql "${TEMP_CONNECTION}" \
-            --command "CREATE EXTENSION IF NOT EXISTS pgcrypto CASCADE;" 2>&1 || {
-            echo -e "${RED}Failed to enable pgcrypto extension - this will cause restore errors${NC}"
-            exit 1
-        }
-        echo -e "${GREEN}✓ pgcrypto extension enabled${NC}"
-    fi
+    echo -e "${YELLOW}Re-applying extensions schema + pgcrypto (Supabase layout)...${NC}"
+    require_extensions_schema || exit 1
     # Test again
     FUNCTION_TEST=$(psql "${TEMP_CONNECTION}" -tAc "SELECT public.generate_content_hash('test', 'test');" 2>/dev/null || echo "ERROR")
     if [[ "$FUNCTION_TEST" == "ERROR" ]] || [ -z "$FUNCTION_TEST" ]; then
-        echo -e "${RED}Function test still failed after enabling pgcrypto - this may cause restore errors${NC}"
+        echo -e "${RED}Function test still failed after enabling pgcrypto — check DB permissions for CREATE EXTENSION${NC}"
+        exit 1
     else
         echo -e "${GREEN}✓ generate_content_hash function is now callable${NC}"
     fi

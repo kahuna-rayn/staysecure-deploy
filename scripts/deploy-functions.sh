@@ -73,7 +73,11 @@ cd "${FUNC_BASE}"
 # Learn client-DB edge functions — deployed to every client project.
 # create-user  : enforces seat limits + writes seats_used to master DB
 # delete-user  : decrements seats_used on master DB after user removal
-ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translate-track" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url" "sync-lesson-content" "generate-lesson" "import-from-document" "get-user-last-logins" "org-api" "org-webhook-publisher" "request-activation-link" "reset-user-mfa" "profile-lookup")
+ALL_FUNCTIONS=("create-user" "delete-user" "send-email" "send-lesson-reminders" "send-password-reset" "translate-lesson" "translate-track" "translation-status" "update-user-password" "update-password" "change-password" "process-scheduled-notifications" "get-document-url" "generate-certificate" "get-certificate-url" "generate-lesson" "import-from-document" "get-user-last-logins" "org-api" "org-webhook-publisher" "phishingbox-sync" "request-activation-link" "reset-user-mfa" "profile-lookup" "user-import-submit" "user-import-process-chunk")
+
+# Master-only learn functions — push content/data FROM master TO client DBs.
+# Deploy with: deploy-functions.sh --master <ref>  (or add --master to the license block)
+MASTER_LEARN_FUNCTIONS=("sync-lesson-content")
 
 # License-app / master-DB edge functions — NOT deployed to client projects.
 # Deploy these separately to the MASTER project ref:
@@ -91,10 +95,15 @@ if [ "$1" = "--list" ]; then
     exit 0
 fi
 
-# --master <project-ref>: deploy license-app functions to the master project.
-# These live in license/supabase/functions/, not in learn/supabase/functions/.
+# --master <project-ref>: deploy license-app functions + master-only learn functions to master.
+# License functions live in license/supabase/functions/, learn master functions in learn/supabase/functions/.
 if [ "$1" = "--master" ]; then
-    MASTER_REF="${2:-$MASTER_PROJECT_REF}"
+    MASTER_REF="${2:-${MASTER_REF:-$MASTER_PROJECT_REF}}"
+    if [ -z "$MASTER_REF" ]; then
+        echo -e "${RED}Error: master project ref not set. Pass it as: --master <ref>${NC}"
+        echo "  Or ensure MASTER_REF is defined in projects.conf"
+        exit 1
+    fi
     LICENSE_FUNC_BASE="${PROJECT_ROOT}/license"
     if [ ! -d "${LICENSE_FUNC_BASE}/supabase/functions" ]; then
         echo -e "${RED}Error: license/supabase/functions not found at ${LICENSE_FUNC_BASE}${NC}"
@@ -113,7 +122,20 @@ if [ "$1" = "--master" ]; then
             echo -e "${YELLOW}Warning: ${func} not found at ${LICENSE_FUNC_BASE}/${FUNC_PATH}, skipping...${NC}"
         fi
     done
-    echo -e "${GREEN}✓ License-app functions deployed to master project ${MASTER_REF}${NC}"
+    echo -e "${GREEN}Deploying master-only learn functions to master project: ${MASTER_REF}${NC}"
+    cd "${PROJECT_ROOT}/learn"
+    for func in "${MASTER_LEARN_FUNCTIONS[@]}"; do
+        FUNC_PATH="supabase/functions/${func}"
+        if [ -d "${FUNC_PATH}" ] && [ -f "${FUNC_PATH}/index.ts" ]; then
+            echo -e "${GREEN}Deploying ${func}...${NC}"
+            supabase_cmd supabase functions deploy "${func}" --no-verify-jwt --project-ref ${MASTER_REF} || {
+                echo -e "${YELLOW}Warning: Failed to deploy ${func}, continuing...${NC}"
+            }
+        else
+            echo -e "${YELLOW}Warning: ${func} not found at ${FUNC_PATH}, skipping...${NC}"
+        fi
+    done
+    echo -e "${GREEN}✓ Master functions deployed to ${MASTER_REF}${NC}"
     exit 0
 fi
 
@@ -122,8 +144,6 @@ fi
 EXPANDED=()
 for arg in "$@"; do
     case "$arg" in
-        --dev)            EXPANDED+=("$DEV_REF") ;;
-        --staging)        EXPANDED+=("$STAGING_REF") ;;
         --all-production)
             if [ ${#PRODUCTION_CLIENT_REFS[@]} -eq 0 ]; then
                 echo -e "${YELLOW}No production client refs configured yet.${NC}"
@@ -137,31 +157,50 @@ for arg in "$@"; do
                 EXPANDED+=("${PRODUCTION_CLIENT_REFS[@]}")
             fi
             ;;
+        --*)
+            # Dynamic lookup: --foo → FOO_REF, --foo-bar → FOO_BAR_REF
+            var_name="$(echo "${arg#--}" | tr '[:lower:]-' '[:upper:]_')_REF"
+            ref="${!var_name}"
+            if [ -n "$ref" ]; then
+                EXPANDED+=("$ref")
+            else
+                echo -e "${RED}Unknown flag: $arg (no ${var_name} defined in projects.conf)${NC}" >&2
+                exit 1
+            fi
+            ;;
         *)                EXPANDED+=("$arg") ;;
     esac
 done
 set -- "${EXPANDED[@]}"
 
 if [[ "$1" == *"-"* ]]; then
-    # Treat as a function name — validate it exists before proceeding
-    FUNC_PATH="supabase/functions/${1}"
-    if [ ! -d "${FUNC_PATH}" ] || [ ! -f "${FUNC_PATH}/index.ts" ]; then
-        echo -e "${RED}Error: Function '${1}' not found at ${FUNC_BASE}/${FUNC_PATH}${NC}"
-        echo ""
-        echo "Available functions:"
-        for f in "${ALL_FUNCTIONS[@]}"; do
-            if [ -f "supabase/functions/${f}/index.ts" ]; then
-                echo -e "  ${GREEN}✓${NC} ${f}"
-            else
-                echo -e "  ${YELLOW}✗${NC} ${f} (missing locally)"
-            fi
-        done
-        exit 1
-    fi
-    SINGLE_FUNC="$1"
+    # Treat as a comma-separated list of function names (e.g. "org-api,create-user")
+    # or a single function name — all must contain hyphens (project refs never do).
+    IFS=',' read -ra REQUESTED_FUNCS <<< "$1"
+    FUNCTIONS=()
+    for fn in "${REQUESTED_FUNCS[@]}"; do
+        FUNC_PATH="supabase/functions/${fn}"
+        if [ ! -d "${FUNC_PATH}" ] || [ ! -f "${FUNC_PATH}/index.ts" ]; then
+            echo -e "${RED}Error: Function '${fn}' not found at ${FUNC_BASE}/${FUNC_PATH}${NC}"
+            echo ""
+            echo "Available functions:"
+            for f in "${ALL_FUNCTIONS[@]}"; do
+                if [ -f "supabase/functions/${f}/index.ts" ]; then
+                    echo -e "  ${GREEN}✓${NC} ${f}"
+                else
+                    echo -e "  ${YELLOW}✗${NC} ${f} (missing locally)"
+                fi
+            done
+            exit 1
+        fi
+        FUNCTIONS+=("$fn")
+    done
     shift
-    FUNCTIONS=("${SINGLE_FUNC}")
-    echo -e "${GREEN}Deploying only: ${SINGLE_FUNC}${NC}"
+    if [ ${#FUNCTIONS[@]} -eq 1 ]; then
+        echo -e "${GREEN}Deploying only: ${FUNCTIONS[0]}${NC}"
+    else
+        echo -e "${GREEN}Deploying: ${FUNCTIONS[*]}${NC}"
+    fi
 else
     FUNCTIONS=("${ALL_FUNCTIONS[@]}")
 fi
@@ -173,29 +212,43 @@ if [ $# -eq 0 ]; then
 fi
 
 # Deploy to each project
+FAILED_PROJECTS=()
 for PROJECT_REF in "$@"; do
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}Deploying functions to project: ${PROJECT_REF}${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-    
+
+    project_failed=false
     for func in "${FUNCTIONS[@]}"; do
         FUNC_PATH="supabase/functions/${func}"
         if [ -d "${FUNC_PATH}" ] && [ -f "${FUNC_PATH}/index.ts" ]; then
             echo -e "${GREEN}Deploying ${func}...${NC}"
-            # supabase functions deploy updates existing functions or creates new ones
-            # It won't fail if the function already exists - it will just update it
-            supabase_cmd supabase functions deploy "${func}" --no-verify-jwt --project-ref ${PROJECT_REF} || {
+            if ! supabase_cmd supabase functions deploy "${func}" --no-verify-jwt --project-ref "${PROJECT_REF}"; then
                 echo -e "${YELLOW}Warning: Failed to deploy ${func} to ${PROJECT_REF}, continuing...${NC}"
-            }
+                project_failed=true
+            fi
         else
             echo -e "${YELLOW}Warning: Function ${func} not found, skipping...${NC}"
         fi
     done
-    
-    echo -e "${GREEN}✓ Completed deployment to ${PROJECT_REF}${NC}"
+
+    if $project_failed; then
+        echo -e "${YELLOW}⚠ Completed deployment to ${PROJECT_REF} (with failures — check warnings above)${NC}"
+        FAILED_PROJECTS+=("${PROJECT_REF}")
+    else
+        echo -e "${GREEN}✓ Completed deployment to ${PROJECT_REF}${NC}"
+    fi
 done
 
 echo ""
-echo -e "${GREEN}✓ All deployments completed${NC}"
+if [ ${#FAILED_PROJECTS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}⚠ Deployments finished with failures:${NC}"
+    for ref in "${FAILED_PROJECTS[@]}"; do
+        echo -e "${YELLOW}  • ${ref}${NC}"
+    done
+    exit 1
+else
+    echo -e "${GREEN}✓ All deployments completed${NC}"
+fi
 

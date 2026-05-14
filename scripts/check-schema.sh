@@ -37,6 +37,14 @@ fi
 case "$1" in
     --dev)     PROJECT_REF="${DEV_REF}" ;;
     --staging) PROJECT_REF="${STAGING_REF}" ;;
+    --*)
+        var_name="$(echo "${1#--}" | tr '[:lower:]-' '[:upper:]_')_REF"
+        PROJECT_REF="${!var_name}"
+        if [ -z "$PROJECT_REF" ]; then
+            echo -e "${RED}Unknown flag: $1 (no ${var_name} defined in projects.conf)${NC}"
+            exit 1
+        fi
+        ;;
     *)         PROJECT_REF="$1" ;;
 esac
 

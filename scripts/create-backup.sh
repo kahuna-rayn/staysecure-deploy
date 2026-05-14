@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # Create Database Backup Script
-# Generates backup files for client onboarding
+# Generates backup files under deploy/backups/ by default (same path onboard-client
+# uses), regardless of the current working directory. Optional second arg overrides output dir.
+# Defaults to STAGING_REF (source of truth for new client dumps).
 
 set -e
 
@@ -11,13 +13,29 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-PROJECT_REF=${1:-""}
-OUTPUT_DIR=${2:-"backups"}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Same directory onboard-client.sh reads (BACKUPS_DIR) — independent of shell cwd.
+DEFAULT_BACKUPS_DIR="${DEPLOY_DIR}/backups"
+
+# Load project refs (DEV_REF, STAGING_REF, MASTER_REF, PRODUCTION_CLIENT_REFS)
+PROJECTS_CONF="${SCRIPT_DIR}/../../learn/secrets/projects.conf"
+if [ -f "${PROJECTS_CONF}" ]; then
+    source "${PROJECTS_CONF}"
+else
+    echo -e "${YELLOW}Warning: projects.conf not found at ${PROJECTS_CONF}${NC}"
+fi
+
+# Default to staging — staging is the source of truth for new client dumps.
+PROJECT_REF=${1:-"${STAGING_REF}"}
+# Optional override; default is always deploy/backups (matches onboard-client).
+OUTPUT_DIR=${2:-"${DEFAULT_BACKUPS_DIR}"}
 
 if [ -z "$PROJECT_REF" ]; then
-    echo -e "${RED}Error: Project reference is required${NC}"
-    echo "Usage: ./create-backup.sh <project-ref> [output-dir]"
-    echo "Example: ./create-backup.sh cleqfnrbiqpxpzxkatda"
+    echo -e "${RED}Error: No project reference and STAGING_REF is not set in projects.conf${NC}"
+    echo "Usage: ./create-backup.sh [project-ref] [output-dir]"
+    echo "  project-ref defaults to STAGING_REF from projects.conf"
+    echo "  output-dir defaults to ${DEFAULT_BACKUPS_DIR} (onboard-client restore path)"
     echo ""
     echo "Environment Variables:"
     echo "  PGPASSWORD - Database password (optional, will prompt if not set)"
@@ -25,9 +43,13 @@ if [ -z "$PROJECT_REF" ]; then
 fi
 
 echo -e "${GREEN}Creating backup for project: ${PROJECT_REF}${NC}"
+if [ "${PROJECT_REF}" = "${STAGING_REF}" ]; then
+    echo -e "${GREEN}  (staging — source of truth for new client dumps)${NC}"
+fi
 
 # Create output directory
-mkdir -p ${OUTPUT_DIR}
+mkdir -p "${OUTPUT_DIR}"
+echo -e "${GREEN}Writing dumps to: ${OUTPUT_DIR}${NC}"
 
 # Get database password from environment variable or prompt
 if [ -z "$PGPASSWORD" ]; then
@@ -73,7 +95,7 @@ pg_dump_cmd \
     --schema=public \
     --format=custom \
     --no-owner \
-    --file ${OUTPUT_DIR}/schema.dump \
+    --file "${OUTPUT_DIR}/schema.dump" \
     --verbose
 
 # Create storage schema backup if it exists
@@ -83,7 +105,7 @@ pg_dump_cmd \
     --schema=storage \
     --format=custom \
     --no-owner \
-    --file ${OUTPUT_DIR}/storage.dump \
+    --file "${OUTPUT_DIR}/storage.dump" \
     --verbose 2>&1 || echo -e "${YELLOW}Note: Storage schema not found or empty (this is OK)${NC}"
 
 echo -e "${GREEN}Creating demo data backup (custom format)...${NC}"
@@ -92,7 +114,7 @@ pg_dump_cmd \
     --schema=public \
     --format=custom \
     --no-owner \
-    --file ${OUTPUT_DIR}/demo.dump \
+    --file "${OUTPUT_DIR}/demo.dump" \
     --verbose
 
 # Create auth.users dump for demo data (needed for foreign key constraints)
@@ -102,7 +124,7 @@ pg_dump_cmd \
     --table=auth.users \
     --format=custom \
     --no-owner \
-    --file ${OUTPUT_DIR}/auth.dump \
+    --file "${OUTPUT_DIR}/auth.dump" \
     --verbose 2>&1 || echo -e "${YELLOW}Note: Could not dump auth.users (may not be accessible)${NC}"
 
 echo -e "${GREEN}✓ Backup files created in ${OUTPUT_DIR}/${NC}"
@@ -120,7 +142,6 @@ fi
 if [ -f "${OUTPUT_DIR}/demo.dump" ]; then
     echo ""
     echo -e "${GREEN}Extracting seed data from demo.dump...${NC}"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [ -f "${SCRIPT_DIR}/extract-seed-data.sh" ]; then
         # Call extract-seed-data.sh with the same PROJECT_REF and OUTPUT_DIR
         "${SCRIPT_DIR}/extract-seed-data.sh" "${OUTPUT_DIR}/demo.dump" "${OUTPUT_DIR}" "${PROJECT_REF}" || {

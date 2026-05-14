@@ -4,11 +4,17 @@
 # Also fetches and prints the org SSO config (GET /v1/org).
 #
 # Usage:
-#   ./pull-learn-profiles.sh [project-ref]
+#   ./pull-learn-profiles.sh --dev
+#   ./pull-learn-profiles.sh --staging
+#   ./pull-learn-profiles.sh --lentor
+#   ./pull-learn-profiles.sh <20-char-project_ref>
+#
+# Project ref and API keys are resolved via projects.conf + learn/secrets/client-api-keys.json.
+# For --dev, keys are read from learn/secrets/dev-secrets.env.
 #
 # Examples:
-#   ./pull-learn-profiles.sh
-#   ./pull-learn-profiles.sh cleqfnrbiqpxpzxkatda
+#   ./pull-learn-profiles.sh --dev
+#   ./pull-learn-profiles.sh --ygos
 #
 # Output:
 #   deploy/scripts/backups/profiles-snapshot-<timestamp>.json
@@ -19,24 +25,30 @@ set -euo pipefail
 # Args & config
 # ---------------------------------------------------------------------------
 
-SECRETS_FILE="$(dirname "$0")/../../learn/secrets/dev-secrets.env"
-if [[ -f "$SECRETS_FILE" ]]; then
-  # shellcheck source=/dev/null
-  set -a; source "$SECRETS_FILE"; set +a
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=client-api-keys.inc.sh
+source "${SCRIPT_DIR}/client-api-keys.inc.sh"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <--dev | --staging | --lentor | --ygos | ... | project_ref>"
+  echo "  --dev / --staging / --<short>   → resolved via projects.conf + client-api-keys.json"
+  echo "  <20-char ref>                   → raw ref; keys looked up in client-api-keys.json"
+  exit 1
 fi
 
-PROJECT_REF="${1:-cleqfnrbiqpxpzxkatda}"
+resolve_api_keys_for_target "$1" || exit $?
+
 API_KEY="${LEARN_API_KEY:-}"
 
 if [[ -z "$API_KEY" ]]; then
-  echo "Error: LEARN_API_KEY not set in dev-secrets.env and not found in environment."
+  echo "Error: LEARN_API_KEY not set — check learn/secrets/dev-secrets.env"
   exit 1
 fi
 
 BASE_URL="https://${PROJECT_REF}.supabase.co/functions/v1/profile-lookup"
 PAGE_SIZE=200
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_DIR="$(dirname "$0")/backups"
+OUTPUT_DIR="${SCRIPT_DIR}/backups"
 OUTPUT_FILE="${OUTPUT_DIR}/profiles-snapshot-${TIMESTAMP}.json"
 
 mkdir -p "$OUTPUT_DIR"
@@ -202,6 +214,7 @@ fi
 jq -n \
   --arg pulled_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
   --arg project_ref "$PROJECT_REF" \
+  --arg client_short "${CLIENT_SHORT:-}" \
   --argjson total_count "$total_count" \
   --argjson fetched "$fetched" \
   --argjson org "$org_data" \
@@ -209,6 +222,7 @@ jq -n \
   --argjson enriched_sample "$enriched_sample" \
   '{
     pulled_at: $pulled_at,
+    client_short: (if $client_short == "" then null else $client_short end),
     project_ref: $project_ref,
     org: $org,
     total_count: $total_count,

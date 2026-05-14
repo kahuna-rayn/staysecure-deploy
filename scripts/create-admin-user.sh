@@ -11,75 +11,102 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration
-PROJECT_REF=${1:-""}
-EMAIL=${2:-""}
-PASSWORD=${3:-""}
-FULL_NAME=${4:-""}
-FIRST_NAME=${5:-""}
-LAST_NAME=${6:-""}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECTS_CONF="${PROJECT_ROOT}/learn/secrets/projects.conf"
+
+if [ ! -f "${PROJECTS_CONF}" ]; then
+    echo -e "${RED}Error: projects.conf not found at ${PROJECTS_CONF}${NC}"
+    exit 1
+fi
+source "${PROJECTS_CONF}"
+
+usage() {
+    echo "Usage: $0 <target> <email> <password> [full-name] [first-name] [last-name]"
+    echo ""
+    echo "  target: --dev | --staging | --master | --<client> | <20-char-ref>"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --lentor admin@example.com SecurePass123 \"John Doe\" John Doe"
+    echo "  $0 --staging admin@example.com SecurePass123"
+    echo "  $0 vgrdwmbhsjoezkfojvcr admin@example.com SecurePass123"
+}
+
+# ── Resolve target → PROJECT_REF ──────────────────────────────────────────────
+TARGET_ARG="${1:-}"
+if [ -z "$TARGET_ARG" ]; then
+    echo -e "${RED}Error: target is required${NC}"
+    usage; exit 1
+fi
+shift
+
+case "$TARGET_ARG" in
+    --dev)     PROJECT_REF="$DEV_REF" ;;
+    --staging) PROJECT_REF="$STAGING_REF" ;;
+    --master)  PROJECT_REF="$MASTER_REF" ;;
+    --*)
+        var_name="$(echo "${TARGET_ARG#--}" | tr '[:lower:]-' '[:upper:]_')_REF"
+        PROJECT_REF="${!var_name:-}"
+        if [ -z "$PROJECT_REF" ]; then
+            echo -e "${RED}Error: unknown flag ${TARGET_ARG} (no ${var_name} in projects.conf)${NC}" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        if [[ "$TARGET_ARG" =~ ^[a-z0-9]{20}$ ]]; then
+            PROJECT_REF="$TARGET_ARG"
+        else
+            echo -e "${RED}Error: '${TARGET_ARG}' is not a valid flag or 20-char project ref${NC}" >&2
+            usage; exit 1
+        fi
+        ;;
+esac
+
+EMAIL="${1:-}"
+PASSWORD="${2:-}"
+FULL_NAME="${3:-}"
+FIRST_NAME="${4:-}"
+LAST_NAME="${5:-}"
 
 # Validate inputs
-if [ -z "$PROJECT_REF" ]; then
-    echo -e "${RED}Error: Project reference is required${NC}"
-    echo "Usage: ./create-admin-user.sh <project-ref> <email> <password> [full-name] [first-name] [last-name]"
-    echo "Example: ./create-admin-user.sh lcpotivitdpdslbqhifs admin@example.com SecurePass123 \"John Doe\" \"John\" \"Doe\""
-    exit 1
-fi
-
 if [ -z "$EMAIL" ]; then
-    echo -e "${RED}Error: Email is required${NC}"
-    echo "Usage: ./create-admin-user.sh <project-ref> <email> <password> [full-name] [first-name] [last-name]"
-    exit 1
+    echo -e "${RED}Error: email is required${NC}"; usage; exit 1
 fi
-
 if [ -z "$PASSWORD" ]; then
-    echo -e "${RED}Error: Password is required${NC}"
-    echo "Usage: ./create-admin-user.sh <project-ref> <email> <password> [full-name] [first-name] [last-name]"
-    exit 1
+    echo -e "${RED}Error: password is required${NC}"; usage; exit 1
 fi
 
 # Set defaults for optional fields
 if [ -z "$FULL_NAME" ]; then
     FULL_NAME=$(echo "$EMAIL" | cut -d'@' -f1)
 fi
-
 if [ -z "$FIRST_NAME" ]; then
     FIRST_NAME=$(echo "$FULL_NAME" | awk '{print $1}')
 fi
-
 if [ -z "$LAST_NAME" ]; then
     LAST_NAME=$(echo "$FULL_NAME" | awk '{print $NF}')
-    if [ "$LAST_NAME" = "$FIRST_NAME" ]; then
-        LAST_NAME=""
+    [ "$LAST_NAME" = "$FIRST_NAME" ] && LAST_NAME=""
+fi
+
+# ── Resolve SUPABASE_SERVICE_ROLE_KEY for the target project ──────────────────
+# Fetch from the CLI so we always use the correct key regardless of .env.local
+echo -e "${GREEN}Fetching service role key for ${PROJECT_REF}...${NC}"
+SUPABASE_SERVICE_ROLE_KEY=$(supabase projects api-keys --project-ref "${PROJECT_REF}" 2>/dev/null \
+    | grep 'service_role' | awk '{print $3}' || true)
+
+if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+    # Fall back to .env.local (useful in offline/dev scenarios)
+    if [ -f "${SCRIPT_DIR}/../.env.local" ]; then source "${SCRIPT_DIR}/../.env.local"
+    elif [ -f ".env.local" ]; then source .env.local
     fi
 fi
 
-# Load environment variables (check current dir and parent dir)
-if [ -f ".env.local" ]; then
-    source .env.local
-elif [ -f "../.env.local" ]; then
-    source ../.env.local
-elif [ -f ".env" ]; then
-    source .env
-elif [ -f "../.env" ]; then
-    source ../.env
-fi
-
-# Check for required environment variables
 if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-    echo -e "${RED}Error: SUPABASE_SERVICE_ROLE_KEY environment variable is not set${NC}"
-    echo ""
-    echo "Please set SUPABASE_SERVICE_ROLE_KEY in one of these ways:"
-    echo "  1. Export it: export SUPABASE_SERVICE_ROLE_KEY=<your-key>"
-    echo "  2. Add to .env.local or .env file in the deploy directory"
-    echo ""
-    echo "You can find the Service Role Key in:"
-    echo "  Supabase Dashboard → Project Settings → API → service_role key"
-    echo "  https://supabase.com/dashboard/project/${PROJECT_REF}/settings/api"
+    echo -e "${RED}Error: could not retrieve SUPABASE_SERVICE_ROLE_KEY for ${PROJECT_REF}${NC}"
+    echo "  • Run: supabase projects api-keys --project-ref ${PROJECT_REF}"
+    echo "  • Or set SUPABASE_SERVICE_ROLE_KEY in deploy/.env.local"
     exit 1
 fi
-
 SUPABASE_URL="https://${PROJECT_REF}.supabase.co"
 CREATE_USER_URL="${SUPABASE_URL}/functions/v1/create-user"
 

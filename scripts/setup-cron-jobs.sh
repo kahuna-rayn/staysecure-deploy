@@ -7,6 +7,9 @@
 #   • Apply a new job to all production projects at once
 #   • Called automatically by onboard-client.sh for new projects
 #
+# Client projects get: manager notifications, lesson reminders, license expiry,
+# device-ingest nightly, and phishingbox-sync nightly (PhishingBox → LEARN DB).
+#
 # Usage:
 #   ./setup-cron-jobs.sh <project-ref> [project-ref2] ...
 #   ./setup-cron-jobs.sh --all-production   (all projects with name ending in -prod)
@@ -160,6 +163,19 @@ for arg in "$@"; do
     case "$arg" in
         --dev)     EXPANDED+=("$DEV_REF") ;;
         --staging) EXPANDED+=("$STAGING_REF") ;;
+        --all-production | --all)
+            # handled below after expansion
+            EXPANDED+=("$arg") ;;
+        --*)
+            var_name="$(echo "${arg#--}" | tr '[:lower:]-' '[:upper:]_')_REF"
+            ref="${!var_name}"
+            if [ -n "$ref" ]; then
+                EXPANDED+=("$ref")
+            else
+                echo -e "${RED}Unknown flag: $arg (no ${var_name} defined in projects.conf)${NC}" >&2
+                exit 1
+            fi
+            ;;
         *)         EXPANDED+=("$arg") ;;
     esac
 done
@@ -248,6 +264,7 @@ for PROJECT_REF in "$@"; do
     NOTIFICATIONS_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/process-scheduled-notifications" | sed "s/'/''/g")
     REMINDERS_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/send-lesson-reminders" | sed "s/'/''/g")
     DEVICE_INGEST_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/device-ingest/v1/sync" | sed "s/'/''/g")
+    PHISHINGBOX_SYNC_URL_ESCAPED=$(echo "https://${PROJECT_REF}.supabase.co/functions/v1/phishingbox-sync" | sed "s/'/''/g")
 
     psql "${CONNECTION_STRING}" <<SQL
 -- Ensure required extensions are present
@@ -388,6 +405,35 @@ SELECT cron.schedule(
     '${AUTH_HEADER_ESCAPED}'
   )
 );
+
+-- ── Job 6: PhishingBox sync  (04:00 UTC daily) ──────────────────────────────
+-- Pulls campaigns + actions into phishing_campaigns / user_phishing_scores.
+-- Requires Edge Function secret PHISHINGBOX_API_TOKEN (deploy/scripts/onboard-client.sh sets it
+-- from env when onboarding; correct PhishingBox base URL must be in the function code).
+-- If PHISHINGBOX_API_TOKEN is unset, the function returns 500 until configured.
+DO \$\$
+BEGIN
+  PERFORM cron.unschedule('phishingbox-sync-nightly');
+EXCEPTION WHEN others THEN NULL;
+END \$\$;
+SELECT cron.schedule(
+  'phishingbox-sync-nightly',
+  '0 4 * * *',
+  format(
+    \$cron\$
+      SELECT net.http_post(
+        url     := %L,
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', %L
+        ),
+        body    := '{}'::jsonb
+      );
+    \$cron\$,
+    '${PHISHINGBOX_SYNC_URL_ESCAPED}',
+    '${AUTH_HEADER_ESCAPED}'
+  )
+);
 SQL
 
     if [ $? -ne 0 ]; then
@@ -405,12 +451,14 @@ WHERE jobname IN (
   'process-staff-pending-notifications',
   'send-daily-lesson-reminders',
   'process-license-expiry-notifications',
-  'device-sync-nightly'
+  'device-sync-nightly',
+  'phishingbox-sync-nightly'
 )
 ORDER BY jobname;
 " 2>/dev/null || true
 
     echo -e "${GREEN}✓ Cron jobs configured for ${DISPLAY}${NC}"
+    echo "  phishingbox-sync-nightly              → 04:00 UTC daily (PhishingBox → DB; set PHISHINGBOX_API_TOKEN)"
     echo "  device-sync-nightly                  → 02:30 UTC daily (device-ingest; no-op if not configured)"
     echo "  process-license-expiry-notifications → 08:00 UTC daily (license_expiry)"
     echo "  process-manager-notifications        → 01:00 UTC daily (manager_employee_incomplete)"
